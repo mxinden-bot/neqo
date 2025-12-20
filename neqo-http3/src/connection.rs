@@ -1552,9 +1552,37 @@ impl Http3Connection {
         send_events: Box<dyn SendStreamEvents>,
         recv_events: Box<dyn RecvStreamEvents>,
     ) -> Res<StreamId> {
-        qtrace!("Create new WebTransport stream session={session_id} type={stream_type:?}");
+        self.webtransport_create_stream_local_with_send_group(
+            conn,
+            session_id,
+            stream_type,
+            send_events,
+            recv_events,
+            None,
+        )
+    }
+
+    pub(crate) fn webtransport_create_stream_local_with_send_group(
+        &mut self,
+        conn: &mut Connection,
+        session_id: StreamId,
+        stream_type: StreamType,
+        send_events: Box<dyn SendStreamEvents>,
+        recv_events: Box<dyn RecvStreamEvents>,
+        send_group: Option<SendGroupId>,
+    ) -> Res<StreamId> {
+        qtrace!(
+            "Create new WebTransport stream session={session_id} type={stream_type:?} send_group={send_group:?}"
+        );
 
         let wt = self.validate_extended_connect_session(session_id)?;
+
+        // Validate send group if provided
+        if let Some(group_id) = send_group
+            && !self.webtransport_validate_send_group(session_id, group_id)?
+        {
+            return Err(Error::InvalidState);
+        }
 
         let stream_id = conn
             .stream_create(stream_type)
@@ -1566,9 +1594,9 @@ impl Http3Connection {
             wt,
             stream_id,
             session_id,
-            send_events,
-            recv_events,
+            (send_events, recv_events),
             true,
+            send_group,
         )?;
         Ok(stream_id)
     }
@@ -1588,9 +1616,9 @@ impl Http3Connection {
             wt,
             stream_id,
             session_id,
-            send_events,
-            recv_events,
+            (send_events, recv_events),
             false,
+            None,
         )?;
         Ok(())
     }
@@ -1600,10 +1628,11 @@ impl Http3Connection {
         webtransport_session: Rc<RefCell<extended_connect::session::Session>>,
         stream_id: StreamId,
         session_id: StreamId,
-        send_events: Box<dyn SendStreamEvents>,
-        recv_events: Box<dyn RecvStreamEvents>,
+        events: (Box<dyn SendStreamEvents>, Box<dyn RecvStreamEvents>),
         local: bool,
+        send_group: Option<SendGroupId>,
     ) -> Res<()> {
+        let (send_events, recv_events) = events;
         webtransport_session.borrow_mut().add_stream(stream_id)?;
         if stream_id.stream_type() == StreamType::UniDi {
             if local {
@@ -1615,6 +1644,7 @@ impl Http3Connection {
                         send_events,
                         webtransport_session,
                         true,
+                        send_group,
                     )),
                 );
             } else {
@@ -1637,6 +1667,7 @@ impl Http3Connection {
                     send_events,
                     Rc::clone(&webtransport_session),
                     local,
+                    send_group,
                 )),
                 Box::new(WebTransportRecvStream::new(
                     stream_id,
