@@ -1564,21 +1564,13 @@ impl PerGroupQueues {
         }
     }
 
-    /// Return the highest-priority stream in this group (highest sendOrder first, then
-    /// regular round-robin), advancing the round-robin pointer for the chosen bucket.
-    fn next_stream_id(&mut self) -> Option<StreamId> {
-        for grp in self.sendordered.values_mut().rev() {
-            if let Some(id) = grp.iter().next() {
-                return Some(id);
-            }
-        }
-        self.regular.iter().next()
-    }
-
     fn remove_stream(&mut self, stream_id: StreamId, sendorder: Option<SendOrder>) {
         if let Some(order) = sendorder {
             if let Some(grp) = self.sendordered.get_mut(&order) {
                 grp.remove(stream_id);
+                if grp.stream_ids().is_empty() {
+                    self.sendordered.remove(&order);
+                }
             }
         } else {
             self.regular.remove(stream_id);
@@ -1586,8 +1578,9 @@ impl PerGroupQueues {
     }
 
     fn is_empty(&self) -> bool {
-        self.regular.stream_ids().is_empty()
-            && self.sendordered.values().all(|g| g.stream_ids().is_empty())
+        // `remove_stream` prunes empty `sendordered` entries, so any remaining entry is
+        // non-empty: the map being empty is equivalent to having no sendordered streams.
+        self.regular.stream_ids().is_empty() && self.sendordered.is_empty()
     }
 
     fn clear(&mut self) {
@@ -1619,25 +1612,19 @@ pub struct SendStreams {
     // processing loop.  The second adds insertion and removal costs, but
     // avoids a CPU penalty for WebTransport streams.  For now we'll do #1.
     //
-    // So we use a sorted Vec<> for the regular streams (that's usually all of
-    // them), and then a BTreeMap of an entry for each SendOrder value, and
-    // for each of those entries a Vec of the stream_ids at that
-    // sendorder.  In most cases (such as stream-per-frame), there will be
-    // a single stream at a given sendorder.
-
-    // These both store stream_ids, which need to be looked up in 'map'.
-    // This avoids the complexity of trying to hold references to the
-    // Streams which are owned by the IndexMap.
-    sendordered: BTreeMap<SendOrder, OrderGroup>,
-    regular: OrderGroup, // streams with no SendOrder set, sorted in stream_id order
+    // Per-send-group queues, including NULL_GROUP_ID for ungrouped fair streams.
+    // Groups are served round-robin; within a group sendOrder determines priority.
     /// Set when any stream has ended; cleared by `remove_ended`.
     has_ended: bool,
 
-    // Per-send-group queues.  Each group is served round-robin relative to other groups;
-    // within a group sendOrder determines priority (spec: groups are bandwidth-equal peers).
     per_group: IndexMap<u64, PerGroupQueues>,
     per_group_next: usize, // round-robin cursor over per_group entries
 }
+
+/// Key used in `per_group` to represent the null sendGroup (ungrouped fair streams).
+/// Real [`SendGroupId`] values start at 1 (see `neqo-http3` `send_group.rs`), so 0 is safe
+/// as a sentinel here.
+const NULL_GROUP_ID: SendGroupId = 0;
 
 impl SendStreams {
     #[allow(
@@ -1667,11 +1654,37 @@ impl SendStreams {
         self.map.insert(id, stream);
     }
 
-    fn group_mut(&mut self, sendorder: Option<SendOrder>) -> &mut OrderGroup {
-        if let Some(order) = sendorder {
-            self.sendordered.entry(order).or_default()
-        } else {
-            &mut self.regular
+    /// Insert `stream_id` into group `gid`'s queue for `sendorder`, creating the group
+    /// if it does not exist yet.
+    fn insert_into_group(
+        &mut self,
+        gid: SendGroupId,
+        stream_id: StreamId,
+        sendorder: Option<SendOrder>,
+    ) {
+        self.per_group
+            .entry(gid)
+            .or_default()
+            .group_mut(sendorder)
+            .insert(stream_id);
+    }
+
+    /// Remove `stream_id` (queued at `sendorder`) from group `gid`, dropping the group
+    /// once it becomes empty and keeping the round-robin cursor in bounds.
+    fn remove_from_group(
+        &mut self,
+        gid: SendGroupId,
+        stream_id: StreamId,
+        sendorder: Option<SendOrder>,
+    ) {
+        if let Some(grp_queues) = self.per_group.get_mut(&gid) {
+            grp_queues.remove_stream(stream_id, sendorder);
+            if grp_queues.is_empty() {
+                self.per_group.shift_remove(&gid);
+                if self.per_group_next >= self.per_group.len() {
+                    self.per_group_next = 0;
+                }
+            }
         }
     }
 
@@ -1680,7 +1693,9 @@ impl SendStreams {
     /// empty groups are removed automatically.
     ///
     /// # Errors
-    /// Returns `InvalidStreamId` if the stream does not exist.
+    /// Returns [`Error::InvalidStreamId`] if the stream does not exist, or if `group_id` is
+    /// `Some` for a stream that is not fair (a send group only applies to fair streams).
+    /// Returns [`Error::InvalidInput`] if `group_id` is the reserved `NULL_GROUP_ID` (0).
     pub fn set_sendgroup(&mut self, stream_id: StreamId, group_id: Option<SendGroupId>) -> Res<()> {
         // Extract the info we need before any other mutable borrows.
         let (was_fair, old_sendorder, old_group) = {
@@ -1688,30 +1703,29 @@ impl SendStreams {
             (stream.is_fair(), stream.sendorder(), stream.send_group())
         };
 
+        // NULL_GROUP_ID (0) is the internal sentinel for ungrouped fair streams; accepting it
+        // as an explicit group would conflate the two and corrupt the per-group queues.
+        if group_id == Some(NULL_GROUP_ID) {
+            return Err(Error::InvalidInput);
+        }
+
         if old_group == group_id {
             return Ok(());
         }
 
-        // Remove from current location.
-        if let Some(old_gid) = old_group {
-            if let Some(grp_queues) = self.per_group.get_mut(&old_gid) {
-                grp_queues.remove_stream(stream_id, old_sendorder);
-                if grp_queues.is_empty() {
-                    self.per_group.shift_remove(&old_gid);
-                    if self.per_group_next >= self.per_group.len() {
-                        self.per_group_next = 0;
-                    }
-                }
-            }
-        } else if was_fair {
-            // Currently in the ungrouped queues.
-            if let Some(order) = old_sendorder {
-                if let Some(grp) = self.sendordered.get_mut(&order) {
-                    grp.remove(stream_id);
-                }
-            } else {
-                self.regular.remove(stream_id);
-            }
+        // A send group only applies to fair streams: a non-fair stream is served by
+        // the unfair loop in `write_frames`, so also placing it in a per-group queue
+        // would serve it twice (double bandwidth). Reject this at the API boundary --
+        // both this and `Connection::stream_sendgroup` are public and callers must set
+        // fairness first.
+        if group_id.is_some() && !was_fair {
+            return Err(Error::InvalidStreamId);
+        }
+
+        // Remove from current location: an explicit group, or the null-group
+        // (ungrouped) slot if the stream was fair but ungrouped.
+        if let Some(gid) = old_group.or_else(|| was_fair.then_some(NULL_GROUP_ID)) {
+            self.remove_from_group(gid, stream_id, old_sendorder);
         }
 
         // Update the stream record.
@@ -1719,22 +1733,10 @@ impl SendStreams {
             stream.set_send_group(group_id);
         }
 
-        if let Some(new_gid) = group_id {
-            // Insert into new group (creating it if needed).
-            self.per_group
-                .entry(new_gid)
-                .or_default()
-                .group_mut(old_sendorder)
-                .insert(stream_id);
-        } else if was_fair {
-            // Move back to ungrouped queues.
-            if let Some(order) = old_sendorder {
-                self.sendordered.entry(order).or_default().insert(stream_id);
-            } else if matches!(self.regular.stream_ids().last(), Some(last) if stream_id > *last) {
-                self.regular.push(stream_id);
-            } else {
-                self.regular.insert(stream_id);
-            }
+        // Insert into the new location: an explicit group, or the null-group
+        // (ungrouped) slot if the stream is fair but ungrouped.
+        if let Some(gid) = group_id.or_else(|| was_fair.then_some(NULL_GROUP_ID)) {
+            self.insert_into_group(gid, stream_id, old_sendorder);
         }
         Ok(())
     }
@@ -1752,32 +1754,19 @@ impl SendStreams {
             (stream.sendorder(), stream.send_group())
         };
         if old_sendorder != sendorder {
-            if let Some(group_id) = send_group {
-                // Grouped stream: update within the group's per-group queues.
-                if let Some(grp_queues) = self.per_group.get_mut(&group_id) {
-                    grp_queues.remove_stream(stream_id, old_sendorder);
-                }
-                if let Some(stream) = self.map.get_mut(&stream_id) {
-                    stream.set_sendorder(sendorder);
-                }
-                if let Some(grp_queues) = self.per_group.get_mut(&group_id) {
-                    grp_queues.group_mut(sendorder).insert(stream_id);
-                }
-                qtrace!(
-                    "grouped stream {stream_id} sendorder -> {sendorder:?} in group {group_id}"
-                );
-            } else {
-                // Ungrouped stream: existing logic (note: causes borrow errors if stream is held).
-                let mut group = self.group_mut(old_sendorder);
-                group.remove(stream_id);
-                self.get_mut(stream_id)?.set_sendorder(sendorder);
-                group = self.group_mut(sendorder);
-                group.insert(stream_id);
-                qtrace!(
-                    "ordering of stream_ids: {:?}",
-                    self.sendordered.values().collect::<Vec::<_>>()
-                );
+            // Grouped and ungrouped fair streams both live in `per_group` (ungrouped
+            // under NULL_GROUP_ID), and the prior `set_fairness` ensures the group
+            // exists. Move the stream between sendOrder buckets within its group; we
+            // re-insert immediately, so skip the empty-group cleanup on removal.
+            let gid = send_group.unwrap_or(NULL_GROUP_ID);
+            if let Some(grp_queues) = self.per_group.get_mut(&gid) {
+                grp_queues.remove_stream(stream_id, old_sendorder);
             }
+            if let Some(stream) = self.map.get_mut(&stream_id) {
+                stream.set_sendorder(sendorder);
+            }
+            self.insert_into_group(gid, stream_id, sendorder);
+            qtrace!("stream {stream_id} sendorder -> {sendorder:?} in group {gid}");
         }
         Ok(())
     }
@@ -1794,36 +1783,36 @@ impl SendStreams {
         let sendorder = stream.sendorder;
         stream.set_fairness(make_fair);
         if !was_fair && make_fair {
-            // A newly fair stream with no send_group goes to the ungrouped regular queue.
+            // A newly fair stream with no send_group goes to the null-group slot in per_group,
+            // so it participates in round-robin alongside all explicit sendGroups (spec: equal).
             // Streams with a send_group are managed by set_sendgroup; don't add here.
             if send_group.is_none() {
                 // This normally is only called when a new stream is created.  If
                 // so, because of how we allocate StreamIds, it should always have
-                // the largest value.  This means we can just append it to the
-                // regular vector.  However, if we were ever to change this
-                // invariant, things would break subtly.
+                // the largest value.  This means we can just append it.  However,
+                // if we were ever to change this invariant, things would break subtly.
 
                 // To be safe we can try to insert at the end and if not
-                // fall back to binary-search insertion
-                if matches!(self.regular.stream_ids().last(), Some(last) if stream_id > *last) {
-                    self.regular.push(stream_id);
+                // fall back to binary-search insertion.
+                let null_grp = self.per_group.entry(NULL_GROUP_ID).or_default();
+                let grp = null_grp.group_mut(sendorder);
+                if matches!(grp.stream_ids().last(), Some(last) if stream_id > *last) {
+                    grp.push(stream_id);
                 } else {
-                    self.regular.insert(stream_id);
+                    grp.insert(stream_id);
                 }
             }
         } else if was_fair && !make_fair {
-            // Remove from whichever queue currently owns this stream.
-            if let Some(group_id) = send_group {
-                if let Some(grp_queues) = self.per_group.get_mut(&group_id) {
-                    grp_queues.remove_stream(stream_id, sendorder);
-                }
-            } else {
-                let group = if let Some(order) = sendorder {
-                    self.sendordered.get_mut(&order).ok_or(Error::Internal)?
-                } else {
-                    &mut self.regular
-                };
-                group.remove(stream_id);
+            // Remove from whichever queue currently owns this stream: an explicit
+            // group, or the null-group (ungrouped) slot.
+            let gid = send_group.unwrap_or(NULL_GROUP_ID);
+            self.remove_from_group(gid, stream_id, sendorder);
+            // A send group applies only to fair streams (see `set_sendgroup`). Clear it
+            // so a later `set_fairness(true)` re-queues the stream in the null group;
+            // otherwise it stays recorded in a group it is no longer queued in and is
+            // never scheduled again.
+            if let Some(stream) = self.map.get_mut(&stream_id) {
+                stream.set_send_group(None);
             }
         }
         Ok(())
@@ -1863,8 +1852,6 @@ impl SendStreams {
 
     pub fn clear(&mut self) {
         self.map.clear();
-        self.sendordered.clear();
-        self.regular.clear();
         self.has_ended = false;
         for (_, grp) in &mut self.per_group {
             grp.clear();
@@ -1879,36 +1866,15 @@ impl SendStreams {
         if !self.has_ended {
             return false;
         }
-        // Collect grouped streams that need removal from per-group queues separately,
-        // since we can't borrow self.per_group while self.map.retain is running.
-        let mut grouped_removals: Vec<(SendGroupId, StreamId, Option<SendOrder>)> = Vec::new();
-
         self.has_ended = false;
         let mut removed = false;
-        for (stream_id, stream) in self
-            .map
-            .extract_if(.., |_, stream: &mut SendStream| stream.is_ended())
-        {
+        for (stream_id, stream) in self.map.extract_if(.., |_, s| s.is_ended()) {
             removed = true;
             if stream.is_fair() {
-                if let Some(group_id) = stream.send_group() {
-                    grouped_removals.push((group_id, stream_id, stream.sendorder()));
-                } else {
-                    match stream.sendorder() {
-                        None => self.regular.remove(stream_id),
-                        Some(sendorder) => {
-                            if let Some(group) = self.sendordered.get_mut(&sendorder) {
-                                group.remove(stream_id);
-                            }
-                        }
-                    }
+                let group_id = stream.send_group().unwrap_or(NULL_GROUP_ID);
+                if let Some(grp_queues) = self.per_group.get_mut(&group_id) {
+                    grp_queues.remove_stream(stream_id, stream.sendorder());
                 }
-            }
-            // if unfair, we're done
-        }
-        for (group_id, stream_id, sendorder) in grouped_removals {
-            if let Some(grp_queues) = self.per_group.get_mut(&group_id) {
-                grp_queues.remove_stream(stream_id, sendorder);
             }
         }
         // Clean up now-empty groups.
@@ -1957,8 +1923,8 @@ impl SendStreams {
         // more expensive searches for insertion and removal (since the
         // sorted order would be lost).
 
-        // Iterate the map, but only those without fairness, then iterate
-        // OrderGroups, then iterate each group
+        // First: unfair streams (non-WebTransport H3 streams, by creation order).
+        // Then: all fair streams via per-group round-robin (includes null sendGroup).
         qtrace!("processing streams...  unfair:");
         for stream in self.map.values_mut() {
             if stream.is_fair() || !stream.has_data_at(priority) {
@@ -1969,63 +1935,62 @@ impl SendStreams {
                 break;
             }
         }
-        qtrace!("fair streams:");
-        let stream_ids = self.regular.iter().chain(
-            self.sendordered
-                .values_mut()
-                .rev()
-                .flat_map(|group| group.iter()),
-        );
-        for stream_id in stream_ids {
-            if let Some(stream) = self.map.get_mut(&stream_id) {
-                if !stream.has_data_at(priority) {
-                    continue;
-                }
-                if let Some(order) = stream.sendorder() {
-                    qtrace!("   {stream_id} ({order})");
-                } else {
-                    qtrace!("   None");
-                }
-                if !stream.write_frames(priority, builder, tokens, stats) {
-                    return;
-                }
-            }
-        }
-
-        // Send groups: round-robin between groups.  Each group contributes one stream
-        // attempt per scheduler pass (starting at per_group_next), so groups get equal
-        // bandwidth share regardless of differing sendOrder values between groups.
-        // Within a group, the highest-sendOrder stream is served first (starving lower
-        // sendOrder within the same group), matching the spec requirement.
+        // Send groups: round-robin between all groups, including NULL_GROUP_ID (ungrouped
+        // fair streams).  The null sendGroup is bandwidth-equal to all explicit sendGroups
+        // (spec: "The user agent considers WebTransportSendGroups as equals when allocating
+        // bandwidth.").  Each group contributes one stream attempt per scheduler pass so
+        // groups get equal bandwidth share regardless of differing sendOrder values between
+        // groups.  Within a group, the highest-sendOrder stream is served first (starving
+        // lower sendOrder within the same group), matching the spec starvation requirement.
         let num_groups = self.per_group.len();
         if num_groups > 0 {
             if self.per_group_next >= num_groups {
                 self.per_group_next = 0;
             }
             let start = self.per_group_next;
-            for i in 0..num_groups {
+            // Split borrows on disjoint fields so we can access both per_group (for
+            // priority ordering) and map (for the stream itself) in the same loop body
+            // without an intermediate Vec.
+            let (per_group, map, per_group_next) =
+                (&mut self.per_group, &mut self.map, &mut self.per_group_next);
+            'groups: for i in 0..num_groups {
                 let idx = (start + i) % num_groups;
-                // Borrow per_group, get the stream_id, then release before accessing map.
-                let stream_id_opt = {
-                    if let Some((_, grp_queues)) = self.per_group.get_index_mut(idx) {
-                        grp_queues.next_stream_id()
-                    } else {
-                        None
-                    }
+                let Some((_, grp)) = per_group.get_index_mut(idx) else {
+                    continue;
                 };
-                if let Some(stream_id) = stream_id_opt {
+                // Within a group, serve one regular (null-sendOrder) stream and then
+                // fall through to the highest sendOrder bucket below. We deliberately
+                // do NOT `continue 'groups` after the regular write: when a group mixes
+                // null-sendOrder and sendOrder streams, neither must be permanently
+                // starved (WebTransport spec write-chunk 6.3 step 6.1), so a sendordered
+                // stream still gets a turn in the same pass.
+                if let Some(stream_id) = grp.regular.iter().next() {
                     qtrace!("send group {idx}: stream {stream_id}");
-                    if let Some(stream) = self.map.get_mut(&stream_id)
+                    if let Some(stream) = map.get_mut(&stream_id)
                         && !stream.write_frames(priority, builder, tokens, stats)
                     {
-                        // Packet full; advance so the next group gets priority next time.
-                        self.per_group_next = (idx + 1) % num_groups;
+                        *per_group_next = (idx + 1) % num_groups;
                         return;
+                    }
+                }
+                for order_grp in grp.sendordered.values_mut().rev() {
+                    if let Some(stream_id) = order_grp.iter().next() {
+                        qtrace!("send group {idx}: stream {stream_id}");
+                        let before = builder.len();
+                        if let Some(stream) = map.get_mut(&stream_id)
+                            && !stream.write_frames(priority, builder, tokens, stats)
+                        {
+                            *per_group_next = (idx + 1) % num_groups;
+                            return;
+                        }
+                        if builder.len() > before {
+                            continue 'groups;
+                        }
                     }
                 }
             }
             // All groups had a chance this pass; advance the cursor for the next call.
-            self.per_group_next = (start + 1) % num_groups;
+            *per_group_next = (start + 1) % num_groups;
         }
     }
 
@@ -2084,12 +2049,139 @@ mod tests {
         fc::SenderFlowControl,
         packet,
         recovery::{self, StreamRecoveryToken},
-        send_stream::{RangeState, RangeTracker, SendStream, SendStreams, State, TxBuffer},
+        send_stream::{
+            NULL_GROUP_ID, RangeState, RangeTracker, SendStream, SendStreams, State, TxBuffer,
+        },
         stats::FrameStats,
     };
 
     fn connection_fc(limit: u64) -> Rc<RefCell<SenderFlowControl<()>>> {
         Rc::new(RefCell::new(SenderFlowControl::new((), limit)))
+    }
+
+    /// A send group only applies to fair streams: assigning one to a non-fair stream
+    /// would let it be served by both the unfair loop and the per-group round-robin
+    /// (double bandwidth), so `set_sendgroup` must reject it. Once the stream is fair,
+    /// the assignment succeeds.
+    #[test]
+    fn set_sendgroup_requires_fair_stream() {
+        let id = StreamId::from(0);
+        let mut ss = SendStreams::default();
+        ss.insert(
+            id,
+            SendStream::new(id, 100, connection_fc(100), ConnectionEvents::default()),
+        );
+
+        assert!(ss.set_sendgroup(id, Some(1)).is_err());
+
+        ss.set_fairness(id, true).unwrap();
+        ss.set_sendgroup(id, Some(1)).unwrap();
+    }
+
+    /// `SendGroupId(0)` is the internal sentinel for ungrouped fair streams, so passing it
+    /// as an explicit group must be rejected rather than corrupt the per-group queues.
+    #[test]
+    fn set_sendgroup_rejects_null_group_id() {
+        let id = StreamId::from(0);
+        let mut ss = SendStreams::default();
+        ss.insert(
+            id,
+            SendStream::new(id, 100, connection_fc(100), ConnectionEvents::default()),
+        );
+        ss.set_fairness(id, true).unwrap();
+
+        assert!(ss.set_sendgroup(id, Some(NULL_GROUP_ID)).is_err());
+    }
+
+    /// A group containing both a regular (null-sendOrder) and a sendordered stream,
+    /// both with data, must serve both in a single pass: the regular stream must not
+    /// permanently starve the sendordered one (WebTransport spec write-chunk 6.3 step
+    /// 6.1). The earlier round-robin `continue 'groups` after the regular write would
+    /// skip the sendordered stream while any regular stream had data.
+    #[test]
+    fn round_robin_serves_regular_and_sendordered_in_group() {
+        let conn_fc = connection_fc(u64::MAX);
+        let conn_events = ConnectionEvents::default();
+        let mut ss = SendStreams::default();
+
+        let regular = StreamId::from(0);
+        let sendordered = StreamId::from(4);
+        for id in [regular, sendordered] {
+            let mut s = SendStream::new(id, 1 << 20, Rc::clone(&conn_fc), conn_events.clone());
+            s.send(&[0; 8]).unwrap();
+            ss.insert(id, s);
+            ss.set_fairness(id, true).unwrap();
+            ss.set_sendgroup(id, Some(1)).unwrap();
+        }
+        ss.set_sendorder(sendordered, Some(100)).unwrap();
+
+        let mut tokens = recovery::Tokens::new();
+        let mut builder =
+            packet::Builder::short(Encoder::default(), false, None::<&[u8]>, packet::LIMIT);
+        ss.write_frames(
+            TransmissionPriority::default(),
+            &mut builder,
+            &mut tokens,
+            &mut FrameStats::default(),
+        );
+
+        let mut served = std::collections::HashSet::new();
+        while !tokens.is_empty() {
+            served.insert(as_stream_token(&tokens.remove(0)).id);
+        }
+        assert!(served.contains(&regular), "regular stream not served");
+        assert!(
+            served.contains(&sendordered),
+            "sendordered stream starved by regular stream in the same group"
+        );
+    }
+
+    /// A grouped stream made non-fair and then fair again must be re-queued, not left
+    /// recorded in a group it was removed from. Otherwise the general (multi-group)
+    /// scheduler never serves it (permanent starvation).
+    #[test]
+    fn set_fairness_false_then_true_requeues_grouped_stream() {
+        let conn_fc = connection_fc(u64::MAX);
+        let conn_events = ConnectionEvents::default();
+        let mut ss = SendStreams::default();
+
+        let groups = [
+            (StreamId::from(0), 1u64.into()),
+            (StreamId::from(4), 2u64.into()),
+            (StreamId::from(8), 3u64.into()),
+        ];
+        let toggled = groups[0].0;
+        for (id, gid) in groups {
+            let mut s = SendStream::new(id, 1 << 20, Rc::clone(&conn_fc), conn_events.clone());
+            s.send(&[0; 8]).unwrap();
+            ss.insert(id, s);
+            ss.set_fairness(id, true).unwrap();
+            ss.set_sendgroup(id, Some(gid)).unwrap();
+        }
+
+        // Two other groups remain after `toggled` leaves its group, forcing the general
+        // multi-group scheduler path rather than the single-group fast path.
+        ss.set_fairness(toggled, false).unwrap();
+        ss.set_fairness(toggled, true).unwrap();
+
+        let mut tokens = recovery::Tokens::new();
+        let mut builder =
+            packet::Builder::short(Encoder::default(), false, None::<&[u8]>, packet::LIMIT);
+        ss.write_frames(
+            TransmissionPriority::default(),
+            &mut builder,
+            &mut tokens,
+            &mut FrameStats::default(),
+        );
+
+        let mut served = std::collections::HashSet::new();
+        while !tokens.is_empty() {
+            served.insert(as_stream_token(&tokens.remove(0)).id);
+        }
+        assert!(
+            served.contains(&toggled),
+            "stream starved after fair -> non-fair -> fair transition"
+        );
     }
 
     #[test]

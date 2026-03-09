@@ -906,22 +906,27 @@ impl Http3Client {
         stream_id: StreamId,
         sendgroup: SendGroupId,
     ) -> Res<()> {
-        // Update the HTTP3-layer stream record (validates ownership against the session).
+        // Update the HTTP3 layer first: it owns the group-registration check, so a
+        // rejection here must not leave the transport scheduler already mutated (that
+        // would persistently diverge the layers — sendOrder would route through the
+        // grouped transport path the HTTP3 layer rejected). If the subsequent
+        // transport update fails (e.g. the stream was closed), that is self-healing:
+        // stream teardown clears both layers.
         self.base_handler
             .stream_set_sendgroup(stream_id, sendgroup)?;
-        // Update the transport-layer scheduler so sendOrder is namespaced per group.
         self.conn
             .stream_sendgroup(stream_id, Some(sendgroup.as_u64()))
             .map_err(|_| Error::InvalidStreamId)
     }
 
+    /// Clears the [`SendGroupId`] for a given WebTransport stream.
+    ///
     /// # Errors
     ///
-    /// Returns `InvalidStreamId` if the stream does not exist.
+    /// It may return [`Error::InvalidStreamId`] if a stream does not exist anymore.
     pub fn webtransport_clear_sendgroup(&mut self, stream_id: StreamId) -> Res<()> {
-        // Update the HTTP3-layer stream record.
+        // See comment in webtransport_set_sendgroup for ordering rationale.
         self.base_handler.stream_clear_sendgroup(stream_id)?;
-        // Remove the group assignment in the transport-layer scheduler.
         self.conn
             .stream_sendgroup(stream_id, None)
             .map_err(|_| Error::InvalidStreamId)
