@@ -8,9 +8,42 @@ use neqo_transport::StreamType;
 
 use crate::{
     Error,
-    features::extended_connect::{CloseReason, tests::webtransport::WtTest},
+    features::extended_connect::{
+        CloseReason,
+        tests::webtransport::{WtTest, wt_default_parameters},
+    },
     webtransport::ClientSession as _,
 };
+
+#[test]
+fn wt_client_stream_uni_limit() {
+    // Server advertises a per-session limit of one client-initiated uni stream.
+    let server_params = wt_default_parameters().wt_initial_max_streams_uni(1);
+    let mut wt = WtTest::new_with_params(wt_default_parameters(), server_params);
+    let wt_session = wt.create_wt_session();
+
+    // The first uni stream is within the advertised limit.
+    _ = wt.create_wt_stream_client(wt_session.stream_id(), StreamType::UniDi);
+    // The second exceeds it.
+    assert_eq!(
+        wt.try_create_wt_stream_client(wt_session.stream_id(), StreamType::UniDi),
+        Err(Error::StreamLimit)
+    );
+}
+
+#[test]
+fn wt_client_stream_bidi_limit() {
+    // Server advertises a per-session limit of one client-initiated bidi stream.
+    let server_params = wt_default_parameters().wt_initial_max_streams_bidi(1);
+    let mut wt = WtTest::new_with_params(wt_default_parameters(), server_params);
+    let wt_session = wt.create_wt_session();
+
+    _ = wt.create_wt_stream_client(wt_session.stream_id(), StreamType::BiDi);
+    assert_eq!(
+        wt.try_create_wt_stream_client(wt_session.stream_id(), StreamType::BiDi),
+        Err(Error::StreamLimit)
+    );
+}
 
 #[test]
 fn wt_client_stream_uni() {

@@ -453,6 +453,10 @@ impl Session {
         self.protocol.validate_send_group(group_id)
     }
 
+    pub(crate) fn local_stream_count(&self, stream_type: neqo_transport::StreamType) -> u64 {
+        self.protocol.local_stream_count(stream_type)
+    }
+
     fn has_data_to_send(&self) -> bool {
         self.control_stream_send.has_data_to_send()
     }
@@ -622,6 +626,10 @@ pub(crate) trait Protocol: Debug + Display {
 
     fn validate_send_group(&self, _group_id: SendGroupId) -> bool {
         false
+    }
+
+    fn local_stream_count(&self, _stream_type: neqo_transport::StreamType) -> u64 {
+        0
     }
 
     fn write_datagram_prefix(&self, encoder: &mut Encoder);

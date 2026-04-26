@@ -11,7 +11,7 @@ use std::{
 };
 
 use neqo_common::{Bytes, Encoder, Header, Role, qtrace};
-use neqo_transport::{Connection, StreamId};
+use neqo_transport::{Connection, StreamId, StreamType};
 use rustc_hash::FxHashSet as HashSet;
 use sfv::{BareItem, Item, Parser};
 
@@ -75,6 +75,18 @@ impl Session {
     /// Validate that a send group belongs to this session.
     pub(crate) fn validate_send_group(&self, group_id: SendGroupId) -> bool {
         self.send_groups.contains(&group_id)
+    }
+
+    #[must_use]
+    pub(crate) fn local_stream_count(&self, stream_type: StreamType) -> u64 {
+        match stream_type {
+            StreamType::UniDi => self.send_streams.iter().filter(|s| !s.is_bidi()).count() as u64,
+            StreamType::BiDi => self
+                .send_streams
+                .iter()
+                .filter(|s| s.is_bidi() && s.is_self_initiated(self.role))
+                .count() as u64,
+        }
     }
 }
 
@@ -247,6 +259,10 @@ impl Protocol for Session {
 
     fn validate_send_group(&self, group_id: SendGroupId) -> bool {
         Self::validate_send_group(self, group_id)
+    }
+
+    fn local_stream_count(&self, stream_type: StreamType) -> u64 {
+        self.local_stream_count(stream_type)
     }
 
     fn write_datagram_prefix(&self, _encoder: &mut Encoder) {
