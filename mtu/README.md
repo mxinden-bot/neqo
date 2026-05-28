@@ -5,6 +5,8 @@
 
 # mtu
 
+<!-- cargo-rdme start -->
+
 A crate to return the name and maximum transmission unit (MTU) of the local network interface
 towards a given destination `SocketAddr`, optionally from a given local `SocketAddr`.
 
@@ -45,4 +47,4 @@ The returned interface name is obtained from the operating system.
 We're happy to receive PRs that improve this crate. Please take a look at our [community
 guidelines](https://github.com/mozilla/neqo/blob/main/CODE_OF_CONDUCT.md) beforehand.
 
-License: MIT OR Apache-2.0
+<!-- cargo-rdme end -->
