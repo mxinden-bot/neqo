@@ -19,14 +19,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: mozilla/actions/rust@312d300af3fb2b6551389bf1cb40b10e86294ec2 # v1.1.4
+      - uses: mozilla/actions/rust@95b043d77461064eed6fbffa7b3f240bcbf19d3b # v1.1.5
         with:
-          tools: cargo-readme
+          tools: cargo-rdme
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - run: |
-          cd mtu # Only works for this crate currently.
-          # TODO: cargo-readme doesn't support workspaces: https://github.com/webern/cargo-readme/issues/81
-          # Leaving this here so we remember to fix it later.
-          # cargo readme -o /tmp/README.md
-          # diff -u README.md /tmp/README.md
+      - name: Check README is up to date
+        run: |
+          cd mtu
+          cargo rdme --check
