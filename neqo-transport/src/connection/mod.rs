@@ -1092,6 +1092,7 @@ impl Connection {
     }
 
     /// Process new input datagrams on the connection.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn process_multiple_input<
         A: AsRef<[u8]> + AsMut<[u8]>,
         I: IntoIterator<Item = Datagram<A>>,
@@ -1195,6 +1196,7 @@ impl Connection {
     /// Returns datagrams to send, and how long to wait before calling again
     /// even if no incoming packets.
     #[must_use = "OutputBatch of the process_multiple_output function must be handled"]
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn process_multiple_output(
         &mut self,
         now: Instant,
