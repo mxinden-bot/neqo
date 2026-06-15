@@ -915,7 +915,7 @@ impl Http3Client {
         self.base_handler
             .stream_set_sendgroup(stream_id, sendgroup)?;
         self.conn
-            .stream_sendgroup(stream_id, Some(sendgroup.as_u64()))
+            .stream_sendgroup(stream_id, Some(sendgroup.as_u64().into()))
             .map_err(|_| Error::InvalidStreamId)
     }
 
