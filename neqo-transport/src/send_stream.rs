@@ -2187,6 +2187,64 @@ mod tests {
         );
     }
 
+    /// Within a group, a null-sendOrder (regular) stream with enough data to fill a
+    /// packet must not starve a higher-priority sendordered stream in the same group.
+    /// `write_frames` serves `grp.regular` first and `return`s the moment the packet is
+    /// full, so the `sendordered` loop below it is never reached while the regular stream
+    /// has data -- a priority inversion (the sendordered stream must still get a turn).
+    ///
+    /// This mirrors `round_robin_serves_regular_and_sendordered_in_group`, but with a
+    /// realistic payload: that test sends only 8 bytes, so the regular stream never fills
+    /// the packet and the bug stays hidden.
+    #[test]
+    fn regular_stream_must_not_starve_sendordered_in_group() {
+        let conn_fc = connection_fc(u64::MAX);
+        let conn_events = ConnectionEvents::default();
+        let mut ss = SendStreams::default();
+
+        let regular = StreamId::from(0);
+        let sendordered = StreamId::from(4);
+
+        // Regular (null-sendOrder) stream with more data than fits in one packet.
+        let mut r = SendStream::new(regular, 1 << 20, Rc::clone(&conn_fc), conn_events.clone());
+        r.send(&[0; 4096]).unwrap();
+        ss.insert(regular, r);
+        ss.set_fairness(regular, true).unwrap();
+        ss.set_sendgroup(regular, Some(SendGroupId::new(1))).unwrap();
+
+        // Higher-priority sendordered stream with only a few bytes: it easily fits
+        // alongside the regular stream if the scheduler gives it a turn.
+        let mut s = SendStream::new(sendordered, 1 << 20, Rc::clone(&conn_fc), conn_events.clone());
+        s.send(&[0; 8]).unwrap();
+        ss.insert(sendordered, s);
+        ss.set_fairness(sendordered, true).unwrap();
+        ss.set_sendgroup(sendordered, Some(SendGroupId::new(1)))
+            .unwrap();
+        ss.set_sendorder(sendordered, Some(100)).unwrap();
+
+        // Constrain the packet so a single stream's frame fills it, forcing the
+        // scheduler to choose which stream to serve first.
+        let mut tokens = recovery::Tokens::new();
+        let mut builder =
+            packet::Builder::short(Encoder::default(), false, None::<&[u8]>, packet::LIMIT);
+        builder.set_limit(builder.len() + 30);
+        ss.write_frames(
+            TransmissionPriority::default(),
+            &mut builder,
+            &mut tokens,
+            &mut FrameStats::default(),
+        );
+
+        let mut served = std::collections::HashSet::new();
+        while !tokens.is_empty() {
+            served.insert(as_stream_token(&tokens.remove(0)).id);
+        }
+        assert!(
+            served.contains(&sendordered),
+            "higher-priority sendordered stream starved by the regular stream in the same group"
+        );
+    }
+
     /// A grouped stream made non-fair and then fair again must be re-queued, not left
     /// recorded in a group it was removed from. Otherwise the general (multi-group)
     /// scheduler never serves it (permanent starvation).
