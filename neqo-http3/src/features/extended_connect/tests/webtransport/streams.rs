@@ -32,6 +32,36 @@ fn wt_client_stream_uni_limit() {
 }
 
 #[test]
+fn wt_client_stream_uni_limit_is_cumulative() {
+    // Per draft-ietf-webtrans-http3-15 (Section 5.6.2) the per-session stream limit is
+    // CUMULATIVE over the session lifetime -- like QUIC's MAX_STREAMS, raised only by
+    // WT_MAX_STREAMS capsules. So closing the one allowed uni stream must NOT free a
+    // slot: a second uni stream must still be rejected. The current code counts only
+    // currently-open streams, so it wrongly allows the second stream once the first
+    // is closed.
+    let server_params = wt_default_parameters().wt_initial_max_streams_uni(1);
+    let mut wt = WtTest::new_with_params(wt_default_parameters(), server_params);
+    let wt_session = wt.create_wt_session();
+
+    // Open and establish the one allowed uni stream, then reset it: the client send
+    // stream is aborted and removed from the session, dropping its concurrent count
+    // back to zero.
+    const BUF: &[u8] = &[0; 10];
+    let first = wt.create_wt_stream_client(wt_session.stream_id(), StreamType::UniDi);
+    wt.send_data_client(first, BUF);
+    drop(wt.receive_data_server(first, true, BUF, false));
+    wt.reset_stream_client(first);
+    wt.receive_reset_server(first, Error::HttpNone.code());
+
+    // A second uni stream exceeds the cumulative lifetime limit, even though the first
+    // has been closed.
+    assert_eq!(
+        wt.try_create_wt_stream_client(wt_session.stream_id(), StreamType::UniDi),
+        Err(Error::StreamLimit)
+    );
+}
+
+#[test]
 fn wt_client_stream_bidi_limit() {
     // Server advertises a per-session limit of one client-initiated bidi stream.
     let server_params = wt_default_parameters().wt_initial_max_streams_bidi(1);
