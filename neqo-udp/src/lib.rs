@@ -137,6 +137,22 @@ fn is_enobufs(_: &io::Error) -> bool {
     false
 }
 
+/// Whether `e` indicates that the kernel rejected a GSO (segmentation offload)
+/// `sendmsg`, e.g. because the network adapter or driver lacks GSO support.
+///
+/// On Linux and Android this surfaces as `EIO`. quinn-udp disables GSO for
+/// subsequent sends once it observes such an error, but it still drops the
+/// offending batch. See <https://github.com/quinn-rs/quinn/issues/2399>.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn is_gso_error(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(libc::EIO)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn is_gso_error(_: &io::Error) -> bool {
+    false
+}
+
 #[cfg(unix)]
 use std::os::fd::AsFd as SocketRef;
 #[cfg(windows)]
@@ -270,7 +286,42 @@ impl<S: SocketRef> Socket<S> {
 
     /// Send a [`datagram::Batch`] on the given [`Socket`].
     pub fn send(&self, d: &datagram::Batch) -> io::Result<()> {
-        send_inner(&self.state, (&self.inner).into(), d)
+        match send_inner(&self.state, (&self.inner).into(), d) {
+            // The kernel rejected a GSO (segmentation offload) batch, e.g.
+            // because the network adapter or driver lacks GSO support. quinn-udp
+            // has now disabled GSO for subsequent sends, but the current batch
+            // was dropped. Resend it as individual datagrams right away, so the
+            // QUIC layer does not have to wait for a probe timeout to retransmit.
+            //
+            // <https://github.com/quinn-rs/quinn/issues/2399>
+            Err(e) if is_gso_error(&e) && d.num_datagrams() > 1 => {
+                qdebug!(
+                    "Failed to send {}-segment GSO batch from {} to {}: {e}. Missing GSO support? Resending as individual datagrams.",
+                    d.num_datagrams(),
+                    d.source(),
+                    d.destination(),
+                );
+                let ecn = EcnCodepoint::from_bits(Into::<u8>::into(d.tos()));
+                for chunk in d.data().chunks(d.datagram_size().get()) {
+                    let transmit = Transmit {
+                        destination: d.destination(),
+                        ecn,
+                        contents: chunk,
+                        segment_size: None,
+                        src_ip: None,
+                    };
+                    match self.state.try_send((&self.inner).into(), &transmit) {
+                        Ok(()) => {}
+                        Err(e) if is_emsgsize(&e) || is_enobufs(&e) => {
+                            qdebug!("Dropping datagram during GSO fallback: {e}");
+                        }
+                        e @ Err(_) => return e,
+                    }
+                }
+                Ok(())
+            }
+            res => res,
+        }
     }
 
     /// Returns the maximum number of GSO segments supported by this socket.
@@ -395,6 +446,15 @@ mod tests {
         let eagain = io::Error::from_raw_os_error(libc::EAGAIN);
         assert!(!is_emsgsize(&eagain));
         assert!(!is_enobufs(&eagain));
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn is_gso_error_matches_eio_only() {
+        assert!(is_gso_error(&io::Error::from_raw_os_error(libc::EIO)));
+        assert!(!is_gso_error(&io::Error::from_raw_os_error(libc::EMSGSIZE)));
+        assert!(!is_gso_error(&io::Error::from_raw_os_error(libc::ENOBUFS)));
+        assert!(!is_gso_error(&io::Error::other("test error")));
     }
 
     #[test]
