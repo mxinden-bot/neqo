@@ -1463,7 +1463,7 @@ impl Connection {
         if let Some(version) = self.conn_params.get_versions().preferred(supported) {
             assert_ne!(self.version, version);
 
-            qinfo!("[{self}] Version negotiation: trying {version:?}");
+            tracing::info!("[{self}] Version negotiation: trying {version:?}");
             let path = self.paths.primary().ok_or(Error::NoAvailablePath)?;
             let local_addr = path.borrow().local_address();
             let remote_addr = path.borrow().remote_address();
@@ -3707,7 +3707,7 @@ impl Connection {
 
     fn set_state(&mut self, state: State, now: Instant) {
         if state > self.state {
-            qdebug!("[{self}] State change from {:?} -> {state:?}", self.state);
+            tracing::debug!("[{self}] State change from {:?} -> {state:?}", self.state);
             let old_state = self.state.clone();
             self.state = state.clone();
             if self.state.closed() {
