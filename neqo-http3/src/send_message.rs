@@ -265,6 +265,18 @@ impl SendStream for SendMessage {
         Ok(())
     }
 
+    fn commit(&mut self, conn: &mut Connection, now: Instant) -> Res<()> {
+        // Flush so the commitment covers everything buffered so far. If it cannot all be flushed
+        // the commitment would fall short, so fail rather than silently under-commit.
+        self.stream.send_buffer(conn, now)?;
+        if self.stream.has_buffered_data() {
+            qdebug!("buffered data at neqo-http3 layer, failing to commit");
+            return Err(Error::Internal);
+        }
+        conn.stream_commit(self.stream_id())?;
+        Ok(())
+    }
+
     // SendMessage owns headers and sends them. It may also own data for the server side.
     // This method returns if they're still being sent. Request body (if any) is sent by
     // http client afterwards using `send_request_body` after receiving DataWritable event.
