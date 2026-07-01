@@ -10,10 +10,11 @@ use neqo_common::event::Provider as _;
 use test_fixture::now;
 
 use super::{
-    connect, default_client, default_server, exchange, new_client, new_server, send_with_extra,
+    assert_error, connect, default_client, default_server, exchange, new_client, new_server,
+    send_with_extra,
 };
 use crate::{
-    Connection, ConnectionParameters, Error, StreamId, StreamType,
+    CloseReason, Connection, ConnectionParameters, Error, StreamId, StreamType,
     connection::test_internal::FrameWriter, events::ConnectionEvent, frame::FrameType, packet,
 };
 
@@ -157,4 +158,55 @@ fn unadvertised_reset_stream_at_is_rejected() {
     let dgram = send_with_extra(&mut server, ResetStreamAtWriter(0), now());
     client.process_input(dgram, now());
     assert!(client.state().closed());
+}
+
+/// Writes a `RESET_STREAM_AT` frame with a caller-chosen stream id and final size (zero error and
+/// reliable size).
+struct ResetStreamAtFinalSizeWriter {
+    stream_id: u64,
+    final_size: u64,
+}
+
+impl FrameWriter for ResetStreamAtFinalSizeWriter {
+    fn write_frames(&mut self, builder: &mut packet::Builder<&mut Vec<u8>>) {
+        // type, stream_id, application_error_code, final_size, reliable_size
+        builder.write_varint_frame(&[
+            FrameType::ResetStreamAt.into(),
+            self.stream_id,
+            0,
+            self.final_size,
+            0,
+        ]);
+    }
+}
+
+/// A `RESET_STREAM_AT` whose final size exceeds the connection flow-control limit is a
+/// `FLOW_CONTROL_ERROR`: the extension must not let a peer bypass connection flow control. The
+/// per-stream window is set large so the connection-level `max_data` is the limit that binds.
+#[test]
+fn reset_stream_at_over_flow_control_limit_is_rejected() {
+    const MAX_DATA: u64 = 2000;
+    let mut client = new_client(
+        ConnectionParameters::default()
+            .max_data(MAX_DATA)
+            .max_stream_data(StreamType::UniDi, true, 1 << 20),
+    );
+    let mut server = default_server();
+    connect(&mut client, &mut server);
+
+    // The server crafts a RESET_STREAM_AT for a server-initiated unidirectional stream (recv-only
+    // for the client) with a final size one byte past the connection's `max_data`. Stream id 7 is
+    // used rather than 3 because `send_with_extra` itself opens stream 3 (with a FIN), which would
+    // otherwise collide on the final size. The client advertised the extension, so the frame is
+    // accepted for processing and then rejected by connection flow control.
+    let dgram = send_with_extra(
+        &mut server,
+        ResetStreamAtFinalSizeWriter {
+            stream_id: 7, // server-initiated unidirectional
+            final_size: MAX_DATA + 1,
+        },
+        now(),
+    );
+    client.process_input(dgram, now());
+    assert_error(&client, &CloseReason::Transport(Error::FlowControl));
 }
