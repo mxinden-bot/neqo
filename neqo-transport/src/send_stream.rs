@@ -4899,4 +4899,45 @@ mod tests {
         let eff = TransmissionPriority::Normal + RetransmissionPriority::default();
         assert!(reset_frame_written(&mut s, eff));
     }
+    /// A reliably-reset stream with committed data still in flight has both a `RESET_STREAM_AT`
+    /// frame and the committed STREAM data pending at the same priority. A single `write_frames`
+    /// call into a packet with ample room should emit both, so the reset and the data it protects
+    /// travel together in one packet.
+    ///
+    /// Today this fails: `write_frames` writes the reset frame and returns early (the `if
+    /// !write_reset_frame(..)` guard skips `write_stream_frame`), so `stats.stream == 0` and the
+    /// committed prefix is deferred to a later packet.
+    #[test]
+    fn reset_and_committed_data_are_coalesced() {
+        let mut s = reliable_stream_committed(&[0x42; 5], &[0x42; 5], ConnectionEvents::default());
+        s.set_priority(TransmissionPriority::Normal, RetransmissionPriority::Same);
+        s.reset(0);
+        assert!(matches!(
+            s.state(),
+            State::ResetSentReliable {
+                reliable_size: 5,
+                ..
+            }
+        ));
+        // Both the RESET_STREAM_AT frame and the committed prefix [0,5) are pending at Normal.
+        assert!(s.has_data_at(TransmissionPriority::Normal));
+
+        // A single write_frames call into a near-empty, full-size packet builder.
+        let mut builder =
+            packet::Builder::short(Encoder::default(), false, None::<&[u8]>, packet::LIMIT);
+        let mut tokens = recovery::Tokens::new();
+        let mut stats = FrameStats::default();
+        assert!(s.write_frames(TransmissionPriority::Normal, &mut builder, &mut tokens, &mut stats));
+        assert!(
+            !builder.is_full(),
+            "there is ample room for both frames in one packet"
+        );
+
+        // Both frames should be in this one packet.
+        assert_eq!(stats.reset_stream_at, 1, "the reset frame is written");
+        assert_eq!(
+            stats.stream, 1,
+            "the committed prefix should be coalesced into the same packet as RESET_STREAM_AT"
+        );
+    }
 }
