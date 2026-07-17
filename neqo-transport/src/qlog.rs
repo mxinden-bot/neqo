@@ -899,4 +899,44 @@ mod tests {
         );
         assert!(output.contains("ssthresh"), "missing ssthresh");
     }
+
+    /// A peer's `active_connection_id_limit` transport parameter is only validated to be
+    /// `>= 2` on decode (RFC 9000 sets no upper bound), so it can legitimately exceed
+    /// `u32::MAX`. `connection_tparams_set` records it in the qlog with an `as u32` cast,
+    /// which silently truncates the value. This test feeds a value just above `u32::MAX`
+    /// and asserts the true value is recorded; it fails until the truncating cast is fixed.
+    #[test]
+    fn tparams_set_active_connection_id_limit_not_truncated() {
+        use neqo_common::Role;
+        use test_fixture::{fixture_init, now};
+
+        use super::connection_tparams_set;
+        use crate::{
+            tparams::{
+                TransportParameter, TransportParameterId::ActiveConnectionIdLimit,
+                TransportParameters, TransportParametersHandler,
+            },
+            version,
+        };
+
+        // u32::MAX + 3 = 4_294_967_298 (0x1_0000_0002). Valid on the wire (>= 2);
+        // truncates to 2 as u32.
+        const LIMIT: u64 = 0x1_0000_0002;
+
+        fixture_init();
+        let mut tph = TransportParametersHandler::new(Role::Client, version::Config::default());
+        let mut remote = TransportParameters::default();
+        remote.set(ActiveConnectionIdLimit, TransportParameter::Integer(LIMIT));
+        tph.set_remote_0rtt(Some(remote));
+
+        let (mut qlog, contents) = new_neqo_qlog();
+        connection_tparams_set(&mut qlog, &tph, now());
+        drop(qlog);
+
+        let output = contents.to_string();
+        assert!(
+            output.contains(&LIMIT.to_string()),
+            "active_connection_id_limit {LIMIT} was truncated in qlog output: {output}"
+        );
+    }
 }
