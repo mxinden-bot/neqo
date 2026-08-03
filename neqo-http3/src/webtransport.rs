@@ -193,7 +193,7 @@ pub trait ClientSession {
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<()>;
+    ) -> Res<bool>;
 }
 
 impl ClientSession for Http3Client {
@@ -335,7 +335,7 @@ impl ClientSession for Http3Client {
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<()> {
+    ) -> Res<bool> {
         qtrace!("webtransport_send_datagram session:{session_id:?}");
         let (conn, handler) = self.connection_and_handler();
         handler.webtransport_send_datagram(session_id, conn, buf, id, now)
@@ -419,7 +419,7 @@ trait Handler {
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<()>;
+    ) -> Res<bool>;
 }
 
 impl Handler for Http3Connection {
@@ -484,7 +484,7 @@ impl Handler for Http3Connection {
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<()> {
+    ) -> Res<bool> {
         self.extended_connect_send_datagram(session_id, conn, buf, id, now)
     }
 }
@@ -522,7 +522,7 @@ pub(crate) trait ServerHandler {
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<()>;
+    ) -> Res<bool>;
 }
 
 impl ServerHandler for Http3ServerHandler {
@@ -577,7 +577,7 @@ impl ServerHandler for Http3ServerHandler {
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<()> {
+    ) -> Res<bool> {
         self.mark_needs_processing();
         self.base_handler_mut()
             .webtransport_send_datagram(session_id, conn, buf, id, now)
@@ -692,7 +692,7 @@ impl ServerSession {
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<()> {
+    ) -> Res<bool> {
         let session_id = self.stream_handler.stream_id();
         self.stream_handler
             .handler

@@ -102,7 +102,7 @@ fn datagram_enabled_on_client() {
     let dgram_sent = server.stats().frame_tx.datagram;
     assert_eq!(
         server.send_datagram(DATA_SMALLER_THAN_MTU.to_vec(), Some(1)),
-        Ok(())
+        Ok(true)
     );
     let out = server.process_output(now()).dgram().unwrap();
     assert_eq!(server.stats().frame_tx.datagram, dgram_sent + 1);
@@ -133,7 +133,7 @@ fn datagram_enabled_on_server() {
     let dgram_sent = client.stats().frame_tx.datagram;
     assert_eq!(
         client.send_datagram(DATA_SMALLER_THAN_MTU.to_vec(), Some(1)),
-        Ok(())
+        Ok(true)
     );
     let out = client.process_output(now()).dgram().unwrap();
     assert_eq!(client.stats().frame_tx.datagram, dgram_sent + 1);
@@ -179,7 +179,7 @@ fn limit_data_size() {
     // but they cannot be sent.
     assert_eq!(
         server.send_datagram(DATA_BIGGER_THAN_MTU.to_vec(), Some(1)),
-        Ok(())
+        Ok(true)
     );
 
     let dgram_dropped_s = server.stats().datagram_tx.dropped_too_big;
@@ -198,7 +198,7 @@ fn limit_data_size() {
     // The same test for the client side.
     assert_eq!(
         client.send_datagram(DATA_BIGGER_THAN_MTU.to_vec(), Some(1)),
-        Ok(())
+        Ok(true)
     );
     let dgram_sent_c = client.stats().frame_tx.datagram;
     assert!(client.process_output(now()).dgram().is_none());
@@ -217,11 +217,11 @@ fn after_dgram_dropped_continue_writing_frames() {
     // but they cannot be sent.
     assert_eq!(
         client.send_datagram(DATA_BIGGER_THAN_MTU.to_vec(), Some(1)),
-        Ok(())
+        Ok(true)
     );
     assert_eq!(
         client.send_datagram(DATA_SMALLER_THAN_MTU.to_vec(), Some(2)),
-        Ok(())
+        Ok(true)
     );
 
     let datagram_dropped = |e| {
@@ -249,7 +249,7 @@ fn datagram_acked() {
     let dgram_sent = client.stats().frame_tx.datagram;
     assert_eq!(
         client.send_datagram(DATA_SMALLER_THAN_MTU.to_vec(), Some(1)),
-        Ok(())
+        Ok(true)
     );
     let out = client.process_output(now()).dgram();
     assert_eq!(client.stats().frame_tx.datagram, dgram_sent + 1);
@@ -303,7 +303,7 @@ fn datagram_after_stream_data() {
 
     // Write a datagram first.
     let dgram_sent = client.stats().frame_tx.datagram;
-    assert_eq!(client.send_datagram(DATA_MTU.to_vec(), Some(1)), Ok(()));
+    assert_eq!(client.send_datagram(DATA_MTU.to_vec(), Some(1)), Ok(true));
 
     // Create a stream with normal priority and send some data.
     let stream_id = client.stream_create(StreamType::BiDi).unwrap();
@@ -345,7 +345,7 @@ fn datagram_before_stream_data() {
 
     // Write a datagram.
     let dgram_sent = client.stats().frame_tx.datagram;
-    assert_eq!(client.send_datagram(DATA_MTU.to_vec(), Some(1)), Ok(()));
+    assert_eq!(client.send_datagram(DATA_MTU.to_vec(), Some(1)), Ok(true));
 
     if let ConnectionEvent::Datagram(data) =
         &send_packet_and_get_server_event(&mut client, &mut server)
@@ -369,7 +369,7 @@ fn datagram_lost() {
     let dgram_sent = client.stats().frame_tx.datagram;
     assert_eq!(
         client.send_datagram(DATA_SMALLER_THAN_MTU.to_vec(), Some(1)),
-        Ok(())
+        Ok(true)
     );
     let _out = client.process_output(now()).dgram(); // This packet will be lost.
     assert_eq!(client.stats().frame_tx.datagram, dgram_sent + 1);
@@ -399,7 +399,7 @@ fn datagram_sent_once() {
     let dgram_sent = client.stats().frame_tx.datagram;
     assert_eq!(
         client.send_datagram(DATA_SMALLER_THAN_MTU.to_vec(), Some(1)),
-        Ok(())
+        Ok(true)
     );
     let _out = client.process_output(now()).dgram();
     assert_eq!(client.stats().frame_tx.datagram, dgram_sent + 1);
@@ -447,51 +447,51 @@ fn outgoing_datagram_queue_full() {
     let (mut client, mut server) = connect_datagram();
 
     let dgram_sent = client.stats().frame_tx.datagram;
+    // Fill the outgoing queue (capacity is `OUTGOING_QUEUE` == 2).
     assert_eq!(
         client.send_datagram(DATA_SMALLER_THAN_MTU.to_vec(), Some(1)),
-        Ok(())
+        Ok(true)
     );
     assert_eq!(
         client.send_datagram(DATA_SMALLER_THAN_MTU_2.to_vec(), Some(2)),
-        Ok(())
+        Ok(true)
     );
 
-    // The outgoing datagram queue limit is 2, therefore the datagram with id 1
-    // will be dropped after adding one more datagram.
-    let dgram_dropped = client.stats().datagram_tx.dropped_queue_full;
-    assert_eq!(client.send_datagram(DATA_MTU.to_vec(), Some(3)), Ok(()));
-    assert!(matches!(
-        client.next_event().unwrap(),
-        ConnectionEvent::OutgoingDatagramOutcome { id, outcome } if id == 1 && outcome == OutgoingDatagramOutcome::DroppedQueueFull
-    ));
-    assert_eq!(
-        client.stats().datagram_tx.dropped_queue_full,
-        dgram_dropped + 1
-    );
+    // The queue is full, so the next datagram is refused (backpressure).
+    // Nothing already queued is dropped and no event is emitted yet.
+    assert_eq!(client.send_datagram(DATA_MTU.to_vec(), Some(3)), Ok(false));
+    assert!(client.next_event().is_none());
 
-    // Send DATA_SMALLER_THAN_MTU_2 datagram
+    // Sending drains a slot and signals that space is available again. The
+    // oldest datagram (id 1) is kept and sent first.
     let out = client.process_output(now()).dgram();
     assert_eq!(client.stats().frame_tx.datagram, dgram_sent + 1);
+    assert!(
+        client
+            .events()
+            .any(|e| matches!(e, ConnectionEvent::OutgoingDatagramSpaceAvailable))
+    );
     server.process_input(out.unwrap(), now());
     assert!(matches!(
         server.next_event().unwrap(),
-        ConnectionEvent::Datagram(data) if data == DATA_SMALLER_THAN_MTU_2
+        ConnectionEvent::Datagram(data) if data == DATA_SMALLER_THAN_MTU
     ));
 
-    // Send DATA_SMALLER_THAN_MTU_2 datagram
+    // With a slot free, the previously-refused datagram can now be queued.
+    assert_eq!(client.send_datagram(DATA_MTU.to_vec(), Some(3)), Ok(true));
     let dgram_sent2 = client.stats().frame_tx.datagram;
     let out = client.process_output(now()).dgram();
     assert_eq!(client.stats().frame_tx.datagram, dgram_sent2 + 1);
     server.process_input(out.unwrap(), now());
     assert!(matches!(
         server.next_event().unwrap(),
-        ConnectionEvent::Datagram(data) if data == DATA_MTU
+        ConnectionEvent::Datagram(data) if data == DATA_SMALLER_THAN_MTU_2
     ));
 }
 
 fn send_datagram(sender: &mut Connection, receiver: &mut Connection, data: Vec<u8>) {
     let dgram_sent = sender.stats().frame_tx.datagram;
-    assert_eq!(sender.send_datagram(data, Some(1)), Ok(()));
+    assert_eq!(sender.send_datagram(data, Some(1)), Ok(true));
     let out = sender.process_output(now()).dgram().unwrap();
     assert_eq!(sender.stats().frame_tx.datagram, dgram_sent + 1);
 
@@ -549,11 +549,11 @@ fn multiple_quic_datagrams_in_one_packet() {
     // Enqueue 2 datagrams that can fit in a single packet.
     assert_eq!(
         client.send_datagram(DATA_SMALLER_THAN_MTU_2.to_vec(), Some(1)),
-        Ok(())
+        Ok(true)
     );
     assert_eq!(
         client.send_datagram(DATA_SMALLER_THAN_MTU_2.to_vec(), Some(2)),
-        Ok(())
+        Ok(true)
     );
 
     let out = client.process_output(now()).dgram();

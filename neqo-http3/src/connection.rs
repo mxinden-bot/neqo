@@ -1612,7 +1612,7 @@ impl Http3Connection {
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<()> {
+    ) -> Res<bool> {
         self.validate_extended_connect_session(session_id)?
             .borrow_mut()
             .send_datagram(conn, buf, id, now)

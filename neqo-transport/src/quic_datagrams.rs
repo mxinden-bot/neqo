@@ -66,6 +66,12 @@ pub struct QuicDatagrams {
     /// The max size of a datagram that would be acceptable by the peer.
     remote_datagram_size: u64,
     max_queued_outgoing_datagrams: usize,
+    /// Set when a send was refused because the outgoing QUIC datagram queue was
+    /// full. Used to emit a single [`OutgoingDatagramSpaceAvailable`] event once
+    /// space frees.
+    ///
+    /// [`OutgoingDatagramSpaceAvailable`]: crate::ConnectionEvent::OutgoingDatagramSpaceAvailable
+    blocked: bool,
     /// Datagram queued for sending.
     datagrams: VecDeque<QuicDatagram>,
     conn_events: ConnectionEvents,
@@ -81,6 +87,7 @@ impl QuicDatagrams {
             local_datagram_size,
             remote_datagram_size: 0,
             max_queued_outgoing_datagrams,
+            blocked: false,
             datagrams: VecDeque::with_capacity(max_queued_outgoing_datagrams),
             conn_events,
         }
@@ -127,6 +134,12 @@ impl QuicDatagrams {
                 debug_assert!(builder.len() <= builder.limit());
                 stats.frame_tx.datagram += 1;
                 tokens.push(recovery::Token::Datagram(*dgram.tracking()));
+                if self.blocked {
+                    // A slot just freed up; let the application resume sending
+                    // QUIC datagrams.
+                    self.blocked = false;
+                    self.conn_events.datagram_space_available();
+                }
             } else if tokens.is_empty() {
                 // If the packet is empty, except packet headers, and the
                 // datagram cannot fit, drop it.
@@ -145,6 +158,13 @@ impl QuicDatagrams {
 
     /// Add a datagram to the send queue.
     ///
+    /// Returns `Ok(true)` if the QUIC datagram was queued, or `Ok(false)` if the
+    /// outgoing QUIC datagram queue is full and the datagram was refused
+    /// (backpressure). When refused, nothing already queued is dropped; the
+    /// application should stop sending until it receives an
+    /// [`OutgoingDatagramSpaceAvailable`] event, which is emitted once a queue
+    /// slot frees up.
+    ///
     /// # Error
     ///
     /// The function returns `TooMuchData` if the supply buffer is bigger than
@@ -152,12 +172,9 @@ impl QuicDatagrams {
     /// datagram can fit into a packet (i.e. MTU limit). This is checked during
     /// creation of an actual packet and the datagram will be dropped if it does
     /// not fit into the packet.
-    pub fn add_datagram(
-        &mut self,
-        data: Vec<u8>,
-        tracking: DatagramTracking,
-        stats: &mut Stats,
-    ) -> Res<()> {
+    ///
+    /// [`OutgoingDatagramSpaceAvailable`]: crate::ConnectionEvent::OutgoingDatagramSpaceAvailable
+    pub fn add_datagram(&mut self, data: Vec<u8>, tracking: DatagramTracking) -> Res<bool> {
         if to_u64(data.len()) > self.remote_datagram_size {
             qdebug!(
                 "QUIC datagram exceeds remote limit, dropping it, datagram size {}, remote datagram size limit {}.",
@@ -167,18 +184,12 @@ impl QuicDatagrams {
             return Err(Error::TooMuchData);
         }
         if self.datagrams.len() == self.max_queued_outgoing_datagrams {
-            qdebug!("QUIC datagram queue full, dropping first datagram in queue (head-drop).");
-            self.conn_events.datagram_outcome(
-                self.datagrams
-                    .pop_front()
-                    .ok_or(Error::Internal)?
-                    .tracking(),
-                OutgoingDatagramOutcome::DroppedQueueFull,
-            );
-            stats.datagram_tx.dropped_queue_full += 1;
+            qdebug!("QUIC datagram queue full, refusing datagram (backpressure).");
+            self.blocked = true;
+            return Ok(false);
         }
         self.datagrams.push_back(QuicDatagram { data, tracking });
-        Ok(())
+        Ok(true)
     }
 
     pub fn handle_datagram(&self, data: &[u8]) -> Res<()> {

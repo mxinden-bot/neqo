@@ -4051,6 +4051,12 @@ impl Connection {
 
     /// Queue a datagram for sending.
     ///
+    /// Returns `Ok(true)` if the QUIC datagram was queued, or `Ok(false)` if the
+    /// outgoing QUIC datagram queue is full and the datagram was refused. On
+    /// `Ok(false)` the application should wait for an
+    /// [`OutgoingDatagramSpaceAvailable`](crate::ConnectionEvent::OutgoingDatagramSpaceAvailable)
+    /// event before sending again; nothing already queued is dropped.
+    ///
     /// # Errors
     ///
     /// The function returns `TooMuchData` if the supply buffer is bigger than
@@ -4061,9 +4067,8 @@ impl Connection {
     /// to check the estimated max datagram size and to use smaller datagrams.
     /// `max_datagram_size` is just a current estimate and will change over
     /// time depending on the encoded size of the packet number, ack frames, etc.
-    pub fn send_datagram<I: Into<DatagramTracking>>(&mut self, buf: Vec<u8>, id: I) -> Res<()> {
-        self.quic_datagrams
-            .add_datagram(buf, id.into(), &mut self.stats.borrow_mut())
+    pub fn send_datagram<I: Into<DatagramTracking>>(&mut self, buf: Vec<u8>, id: I) -> Res<bool> {
+        self.quic_datagrams.add_datagram(buf, id.into())
     }
 
     /// Return the PLMTU of the primary path.
