@@ -115,6 +115,8 @@ pub enum Http3ClientEvent {
     WebTransport(WebTransportEvent),
     /// `ConnectUdp` events
     ConnectUdp(ConnectUdpEvent),
+    /// The outgoing QUIC datagram queue has space again after having been full.
+    OutgoingDatagramSpaceAvailable,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -331,6 +333,12 @@ impl Http3ClientEvents {
     /// Append an event, allowing duplicates.
     pub(crate) fn push(&self, event: Http3ClientEvent) {
         self.events.push(event);
+    }
+
+    /// Signal that the outgoing QUIC datagram queue has space again.
+    pub(crate) fn datagram_space_available(&self) {
+        self.events
+            .push_unique(Http3ClientEvent::OutgoingDatagramSpaceAvailable);
     }
 
     /// Add a new `StateChange` event.

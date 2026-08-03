@@ -44,6 +44,8 @@ pub enum Http3ServerConnEvent {
     },
     /// Connection state change.
     StateChange(Http3State),
+    /// The outgoing QUIC datagram queue has space again after having been full.
+    OutgoingDatagramSpaceAvailable,
     WebTransport(WebTransportEvent),
     ConnectUdp(ConnectUdpEvent),
 }
@@ -251,6 +253,12 @@ impl Http3ServerConnEvents {
 
     pub fn connection_state_change(&self, state: Http3State) {
         self.events.push(Http3ServerConnEvent::StateChange(state));
+    }
+
+    /// Signal that the outgoing QUIC datagram queue has space again.
+    pub fn datagram_space_available(&self) {
+        self.events
+            .push_unique(Http3ServerConnEvent::OutgoingDatagramSpaceAvailable);
     }
 
     pub fn priority_update(&self, stream_id: StreamId, priority: Priority) {
