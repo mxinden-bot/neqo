@@ -15,8 +15,8 @@ use test_fixture::now;
 use super::{
     super::{Connection, ConnectionParameters, IdleTimeout, Output, State},
     AT_LEAST_PTO, DEFAULT_RTT, DEFAULT_STREAM_DATA, connect, connect_force_idle, connect_rtt_idle,
-    connect_with_rtt, default_client, default_server, maybe_authenticate, new_client, new_server,
-    send_and_receive, send_something,
+    connect_with_rtt, default_client, default_server, exchange_ticket, maybe_authenticate,
+    new_client, new_server, send_and_receive, send_something,
 };
 use crate::{
     CloseReason, Error, packet, recovery,
@@ -919,4 +919,85 @@ fn max_pto_counter_resets_on_ack() {
     }
     assert_eq!(client.loss_recovery.pto_count(), 2);
     assert!(!matches!(client.state(), State::Closed(_)));
+}
+
+/// A 0-RTT connection attempt into a black hole is NOT declared broken early by
+/// the `max_pto` detector, because that detector only runs once `connected()`.
+/// The handshake never completes, so nothing short-circuits the wait: the client
+/// keeps probing a dead path and only gives up at the idle timeout, ~30s later,
+/// even with `max_pto` set as low as it goes.
+///
+/// This is the transport-side view of the necko/happy-eyeballs assumption baked
+/// into `process_timer`: giving up on a black-holed handshake is left to whatever
+/// races another attempt. If nothing races it, a lone 0-RTT attempt takes the
+/// full idle timeout to fail rather than a few PTOs.
+#[test]
+fn zero_rtt_black_hole_takes_idle_timeout_to_fail() {
+    const MAX_PTO: usize = 3;
+
+    // Establish a session and take a resumption token so the next client can 0-RTT.
+    let mut client = default_client();
+    let mut server = default_server();
+    connect(&mut client, &mut server);
+    let token = exchange_ticket(&mut client, &mut server, now());
+
+    // Fresh client that resumes with 0-RTT and has the black-hole detector armed
+    // via a low `max_pto`. Were that detector active during the handshake, the
+    // attempt would be declared `TooManyPtos` after only `MAX_PTO` probes.
+    let mut client =
+        new_client(ConnectionParameters::default().max_pto(NonZeroUsize::new(MAX_PTO)));
+    client
+        .enable_resumption(now(), token)
+        .expect("should set resumption token");
+
+    // Flush the ClientHello (Initial). This installs the 0-RTT keys and moves the
+    // client into the 0-RTT sending state, which is required before early-data
+    // streams can be created. The datagrams are dropped: the black hole starts here.
+    let start = now();
+    let mut now = start;
+    while let Output::Datagram(_) = client.process_output(now) {}
+
+    // Queue early data so this is a real 0-RTT attempt, not a bare Initial.
+    let stream = client.stream_create(StreamType::BiDi).unwrap();
+    _ = client.stream_send(stream, DEFAULT_STREAM_DATA).unwrap();
+
+    // Black hole: drop everything the client emits and drive its timers until it
+    // gives up. The server never responds, so the handshake never completes.
+    // The idle timeout is ~30s; this bound is only a runaway-loop guard.
+    let deadline = start + default_timeout() * 10;
+    while !matches!(client.state(), State::Closed(_)) {
+        match client.process_output(now) {
+            Output::Datagram(_) => {} // dropped
+            Output::Callback(t) => now += t,
+            Output::None => break,
+        }
+        assert!(
+            now < deadline,
+            "client never gave up on the black-holed 0-RTT attempt"
+        );
+    }
+
+    // It closed on the idle timeout, not the fast black-hole detector.
+    assert!(
+        matches!(
+            client.state(),
+            State::Closed(CloseReason::Transport(Error::IdleTimeout))
+        ),
+        "expected IdleTimeout, got {:?}",
+        client.state()
+    );
+    // And it burned through far more than `MAX_PTO` consecutive PTOs getting there:
+    // the detector that would have stopped it after `MAX_PTO` never ran.
+    assert!(
+        client.loss_recovery.pto_count() > MAX_PTO,
+        "pto_count {} did not exceed max_pto {MAX_PTO}",
+        client.loss_recovery.pto_count()
+    );
+    // The whole point: it took ~the full idle timeout to fail, not a few PTOs.
+    assert!(
+        now - start >= default_timeout(),
+        "gave up after {:?}, expected to wait the full {:?} idle timeout",
+        now - start,
+        default_timeout()
+    );
 }
