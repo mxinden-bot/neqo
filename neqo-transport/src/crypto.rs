@@ -492,6 +492,10 @@ pub struct CryptoDxState {
     invocations: packet::Number,
     /// The basis of the invocation limits in `invocations`.
     largest_packet_len: usize,
+    /// Whether a key update has already been detected from this read state.
+    /// Latching this stops a duplicated packet from being detected as the same
+    /// update again, which would re-enter the key update path.
+    key_update_detected: bool,
 }
 
 const INITIAL_LARGEST_PACKET_LEN: usize = 1 << 11; // 2048
@@ -525,6 +529,7 @@ impl CryptoDxState {
             min_pn,
             invocations: Self::limit(direction, cipher),
             largest_packet_len: INITIAL_LARGEST_PACKET_LEN,
+            key_update_detected: false,
         })
     }
 
@@ -618,6 +623,7 @@ impl CryptoDxState {
             min_pn: pn,
             invocations,
             largest_packet_len: INITIAL_LARGEST_PACKET_LEN,
+            key_update_detected: false,
         })
     }
 
@@ -672,12 +678,17 @@ impl CryptoDxState {
         Ok(())
     }
 
-    #[must_use]
-    pub fn needs_update(&self) -> bool {
-        // Only initiate a key update if we have processed exactly one packet
-        // and we are in an epoch greater than 3.
-        self.used_pn.start + 1 == self.used_pn.end
-            && self.epoch > usize::from(Epoch::ApplicationData)
+    /// Whether the packet just decrypted is where we detect a key update by
+    /// the peer. Records the detection, so a duplicate of that packet is not
+    /// detected as a second key update.
+    pub fn detect_key_update(&mut self) -> bool {
+        // A key update is detected on the first packet of an epoch greater
+        // than 3.
+        let detected = !self.key_update_detected
+            && self.used_pn.start + 1 == self.used_pn.end
+            && self.epoch > usize::from(Epoch::ApplicationData);
+        self.key_update_detected |= detected;
+        detected
     }
 
     #[must_use]
@@ -1438,6 +1449,7 @@ impl CryptoStates {
                 min_pn: 0,
                 invocations: 10,
                 largest_packet_len: INITIAL_LARGEST_PACKET_LEN,
+                key_update_detected: false,
             },
             cipher: TLS_CHACHA20_POLY1305_SHA256,
             next_secret: secret.clone(),

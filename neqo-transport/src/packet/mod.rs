@@ -989,7 +989,7 @@ impl<'a> Public<'a> {
         };
         // If this is the first packet ever successfully decrypted
         // using `rx`, make sure to initiate a key update.
-        if rx.needs_update() {
+        if rx.detect_key_update() {
             crypto.key_update_received(release_at).map_err(make_err)?;
         }
         crypto.check_pn_overlap().map_err(make_err)?;
