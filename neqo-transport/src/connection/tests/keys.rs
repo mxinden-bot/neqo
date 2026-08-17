@@ -222,6 +222,35 @@ fn key_update_consecutive() {
     check_discarded(&mut client, &dgram, false, 1, 0);
 }
 
+// Receiving the same key update packet twice must not be treated as two key
+// updates. The packet carrying a new key phase is decrypted with a key state
+// that has recorded a single packet number, which is how `needs_update` detects
+// a key update. Redelivering the packet leaves that state unchanged, so
+// `needs_update` fires again before the read keys rotate.
+#[test]
+fn key_update_received_twice() {
+    let mut client = default_client();
+    let mut server = default_server();
+    connect_force_idle(&mut client, &mut server);
+    let now = now();
+
+    // The server initiates a key update, so its next packet carries the new key
+    // phase.
+    assert!(server.initiate_key_update().is_ok());
+    assert_eq!(server.get_epochs(), (Some(4), Some(3)));
+    let dgram = send_something(&mut server, now);
+
+    // The client updates its write keys and arms the read-key timer, but does
+    // not rotate its read keys until that timer fires.
+    client.process_input(dgram.clone(), now);
+    assert_eq!(client.get_epochs(), (Some(4), Some(3)));
+
+    // The same packet again, before the timer fires, used to trip a debug
+    // assertion in `CryptoStates::maybe_update_write`. It must be a no-op.
+    client.process_input(dgram, now);
+    assert_eq!(client.get_epochs(), (Some(4), Some(3)));
+}
+
 // Key updates can't be initiated too early.
 #[test]
 fn key_update_before_confirmed() {
