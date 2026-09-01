@@ -19,7 +19,7 @@ use std::{
 
 use neqo_common::{
     Buffer, Datagram, Decoder, Ecn, Encoder, Role, Tos, datagram,
-    event::Provider as EventProvider,
+    event::{Provider as EventProvider, Queue},
     expect_usize,
     hex::{Hex, HexSnipMiddle, HexWithLen},
     hrtime, qdebug, qerror, qinfo,
@@ -4145,16 +4145,8 @@ impl Connection {
 impl EventProvider for Connection {
     type Event = ConnectionEvent;
 
-    /// Return true if there are outstanding events.
-    fn has_events(&self) -> bool {
-        self.events.has_events()
-    }
-
-    /// Get events that indicate state changes on the connection. This method
-    /// correctly handles cases where handling one event can obsolete
-    /// previously-queued events, or cause new events to be generated.
-    fn next_event(&mut self) -> Option<Self::Event> {
-        self.events.next_event()
+    fn queue(&self) -> Queue<ConnectionEvent> {
+        self.events.queue()
     }
 }
 

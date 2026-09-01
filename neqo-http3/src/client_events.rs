@@ -401,14 +401,8 @@ impl Http3ClientEvents {
 impl EventProvider for Http3ClientEvents {
     type Event = Http3ClientEvent;
 
-    /// Check if there is any event present.
-    fn has_events(&self) -> bool {
-        !self.events.is_empty()
-    }
-
-    /// Take the first event.
-    fn next_event(&mut self) -> Option<Self::Event> {
-        self.events.next_event()
+    fn queue(&self) -> EventQueue<Http3ClientEvent> {
+        self.events.clone()
     }
 }
 

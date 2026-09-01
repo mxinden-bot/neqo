@@ -16,7 +16,7 @@ use std::{
 
 use neqo_common::{
     Datagram, Decoder, Encoder, Header, Role,
-    event::Provider as EventProvider,
+    event::{Provider as EventProvider, Queue},
     hex::{Hex, HexWithLen},
     qdebug, qinfo,
     qlog::Qlog,
@@ -1136,16 +1136,8 @@ impl Http3Client {
 impl EventProvider for Http3Client {
     type Event = Http3ClientEvent;
 
-    /// Return true if there are outstanding events.
-    fn has_events(&self) -> bool {
-        self.events.has_events()
-    }
-
-    /// Get events that indicate state changes on the connection. This method
-    /// correctly handles cases where handling one event can obsolete
-    /// previously-queued events, or cause new events to be generated.
-    fn next_event(&mut self) -> Option<Self::Event> {
-        self.events.next_event()
+    fn queue(&self) -> Queue<Http3ClientEvent> {
+        self.events.queue()
     }
 }
 

@@ -94,13 +94,21 @@ impl<T> Queue<T> {
 pub trait Provider {
     type Event;
 
+    /// The queue holding the events. Clones share it, so this is cheap.
+    #[must_use]
+    fn queue(&self) -> Queue<Self::Event>;
+
     /// Get the next event.
     #[must_use]
-    fn next_event(&mut self) -> Option<Self::Event>;
+    fn next_event(&mut self) -> Option<Self::Event> {
+        self.queue().next_event()
+    }
 
     /// Determine whether there are pending events.
     #[must_use]
-    fn has_events(&self) -> bool;
+    fn has_events(&self) -> bool {
+        !self.queue().is_empty()
+    }
 
     /// Construct an iterator that produces all events.
     fn events(&'_ mut self) -> Iter<'_, Self> {
@@ -124,21 +132,21 @@ impl<P: Provider + ?Sized> Iterator for Iter<'_, P> {
 mod tests {
     use super::Provider;
 
-    struct MockProvider(std::collections::VecDeque<u32>);
+    struct MockProvider(super::Queue<u32>);
 
     impl Provider for MockProvider {
         type Event = u32;
-        fn next_event(&mut self) -> Option<u32> {
-            self.0.pop_front()
-        }
-        fn has_events(&self) -> bool {
-            !self.0.is_empty()
+        fn queue(&self) -> super::Queue<u32> {
+            self.0.clone()
         }
     }
 
     #[test]
     fn iter_yields_events() {
-        let mut p = MockProvider(std::collections::VecDeque::from([1, 2, 3]));
+        let mut p = MockProvider(super::Queue::default());
+        for i in 1..=3 {
+            p.0.push(i);
+        }
         assert!(p.has_events());
         let events: Vec<u32> = p.events().collect();
         assert_eq!(events, [1, 2, 3]);
@@ -147,7 +155,7 @@ mod tests {
 
     #[test]
     fn iter_empty() {
-        let mut p = MockProvider(std::collections::VecDeque::new());
+        let mut p = MockProvider(super::Queue::default());
         assert!(!p.has_events());
         assert_eq!(p.events().next(), None);
     }
