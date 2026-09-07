@@ -58,7 +58,11 @@ pub(crate) trait ExtendedConnectEvents: Debug {
     );
     /// The control stream has flow-control space again after a datagram capsule
     /// was refused with `FlowControlLimit`, so the sender can resume.
-    fn datagram_space_available(&self);
+    ///
+    /// This is the HTTP DATAGRAM Capsule path only. On the QUIC datagram path the
+    /// resume event instead originates in `neqo-transport` and is forwarded to
+    /// the HTTP/3 event by the connection.
+    fn capsule_space_available(&self);
 }
 
 #[derive(Debug, PartialEq, Copy, Clone, Eq, strum::Display)]

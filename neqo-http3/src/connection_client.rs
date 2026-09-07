@@ -33,7 +33,7 @@ use crate::{
     Error, Http3Parameters, NewStreamType, Priority, ReceiveOutput, Res, SendGroupId,
     client_events::{Http3ClientEvent, Http3ClientEvents, WebTransportEvent},
     connection::{Http3Connection, Http3State, RequestDescription},
-    features::{ConnectType, extended_connect::ExtendedConnectEvents as _},
+    features::ConnectType,
     frames::HFrame,
     request_target::RequestTarget,
     settings::HSettings,
