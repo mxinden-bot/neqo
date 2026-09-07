@@ -520,79 +520,8 @@ fn connect_udp_operation_on_fetch_stream() {
 }
 
 #[test]
-#[expect(clippy::too_many_lines, reason = "OK for a test.")]
 fn session_lifecycle_with_http_datagram_capsule() {
-    fixture_init();
-    neqo_common::log::init(None);
-
-    let conn_params = ConnectionParameters::default().datagram_size(0);
-
-    let mut client = http3_client_with_params(
-        Http3Parameters::default()
-            .connect(true)
-            .connection_parameters(conn_params.clone()),
-    );
-
-    let mut proxy = http3_server_with_params(
-        Http3Parameters::default()
-            .connect(true)
-            .connection_parameters(conn_params),
-    );
-
-    let out = test_fixture::connect_peers(&mut client, &mut proxy);
-    if let Some(dgram) = out {
-        let out = proxy.process(Some(dgram), now()).dgram();
-        if let Some(dgram) = out {
-            client.process_input(dgram, now());
-        }
-    }
-
-    let session_id = client
-        .connect_udp_create_session(
-            now(),
-            &format!("https://[{}]:{}/", DEFAULT_ADDR.ip(), DEFAULT_ADDR.port())
-                .parse::<Uri>()
-                .unwrap(),
-            &[],
-        )
-        .unwrap();
-
-    exchange_packets(&mut client, &mut proxy, false, None);
-
-    let proxy_session = proxy
-        .events()
-        .find_map(|event| {
-            if let Http3ServerEvent::ConnectUdp(ServerEvent::NewSession { session, headers }) =
-                event
-            {
-                assert_eq!(session.stream_id(), session_id);
-                assert!(
-                    headers.contains_header(":method", "CONNECT")
-                        && headers.contains_header(":protocol", "connect-udp")
-                        && headers.contains_header("capsule-protocol", "?1")
-                );
-                session
-                    .response(&SessionAcceptAction::Accept, now())
-                    .unwrap();
-                Some(session)
-            } else {
-                None
-            }
-        })
-        .unwrap();
-
-    exchange_packets(&mut client, &mut proxy, false, None);
-
-    client
-        .events()
-        .find(|e| {
-            matches!(
-                e,
-                Http3ClientEvent::ConnectUdp(ConnectUdpEvent::NewSession { stream_id, status, ..})
-                if *stream_id == session_id && *status == 200
-            )
-        })
-        .unwrap();
+    let (mut client, mut proxy, session_id, proxy_session) = establish_capsule_session(None);
 
     qinfo!("Testing Capsule send (client -> server)");
     client
@@ -788,12 +717,21 @@ fn outgoing_datagram_space_available_forwarded() {
 /// Establish a connect-udp session over the HTTP DATAGRAM Capsule path, granting
 /// the client only `proxy_max_stream_data` bytes of control-stream flow control.
 fn establish_capsule_session(
-    proxy_max_stream_data: u64,
-) -> (Http3Client, Http3Server, neqo_http3::StreamId) {
+    proxy_max_stream_data: Option<u64>,
+) -> (
+    Http3Client,
+    Http3Server,
+    neqo_http3::StreamId,
+    ServerSession,
+) {
     fixture_init();
     neqo_common::log::init(None);
 
     // `datagram_size(0)` forces the HTTP DATAGRAM Capsule path.
+    let mut proxy_params = ConnectionParameters::default().datagram_size(0);
+    if let Some(v) = proxy_max_stream_data {
+        proxy_params = proxy_params.max_stream_data(StreamType::BiDi, true, v);
+    }
     let mut client = http3_client_with_params(
         Http3Parameters::default()
             .connect(true)
@@ -802,11 +740,7 @@ fn establish_capsule_session(
     let mut proxy = http3_server_with_params(
         Http3Parameters::default()
             .connect(true)
-            .connection_parameters(
-                ConnectionParameters::default()
-                    .datagram_size(0)
-                    .max_stream_data(StreamType::BiDi, true, proxy_max_stream_data),
-            ),
+            .connection_parameters(proxy_params),
     );
 
     let out = test_fixture::connect_peers(&mut client, &mut proxy);
@@ -828,10 +762,18 @@ fn establish_capsule_session(
 
     exchange_packets(&mut client, &mut proxy, false, None);
 
-    proxy
+    let proxy_session = proxy
         .events()
         .find_map(|event| {
-            if let Http3ServerEvent::ConnectUdp(ServerEvent::NewSession { session, .. }) = event {
+            if let Http3ServerEvent::ConnectUdp(ServerEvent::NewSession { session, headers }) =
+                event
+            {
+                assert_eq!(session.stream_id(), session_id);
+                assert!(
+                    headers.contains_header(":method", "CONNECT")
+                        && headers.contains_header(":protocol", "connect-udp")
+                        && headers.contains_header("capsule-protocol", "?1")
+                );
                 session
                     .response(&SessionAcceptAction::Accept, now())
                     .unwrap();
@@ -854,7 +796,7 @@ fn establish_capsule_session(
         })
         .unwrap();
 
-    (client, proxy, session_id)
+    (client, proxy, session_id, proxy_session)
 }
 
 /// A datagram capsule that would exceed the control stream's flow-control window
@@ -862,7 +804,7 @@ fn establish_capsule_session(
 /// sender receives a resume event once the window reopens.
 #[test]
 fn datagram_capsule_flow_control_error_and_resume() {
-    let (mut client, mut proxy, session_id) = establish_capsule_session(2000);
+    let (mut client, mut proxy, session_id, _proxy_session) = establish_capsule_session(Some(2000));
 
     // Fill the control stream's flow-control window with datagram capsules until
     // one is refused; a refusal is an error, never a silent drop.
