@@ -857,29 +857,15 @@ fn establish_capsule_session(
     (client, proxy, session_id)
 }
 
-/// A datagram capsule that would exceed the control stream's flow-control
-/// window returns an error instead of being silently dropped.
+/// A datagram capsule that would exceed the control stream's flow-control window
+/// is refused with `FlowControlLimit` rather than silently dropped, and the
+/// sender receives a resume event once the window reopens.
 #[test]
-fn datagram_capsule_flow_control_error() {
-    let (mut client, _proxy, session_id) = establish_capsule_session(2000);
-
-    // Far larger than the control stream's flow-control window, so it cannot be
-    // written as a Capsule and is reported as an error, not silently dropped.
-    let too_big = vec![0x2c; 100_000];
-    assert_eq!(
-        client.connect_udp_send_datagram(session_id, &too_big, None, now()),
-        Err(Error::FlowControlLimit)
-    );
-}
-
-/// Once the control stream's flow-control window reopens, a sender that was
-/// refused with `FlowControlLimit` receives a resume event.
-#[test]
-fn datagram_capsule_flow_control_resumes() {
+fn datagram_capsule_flow_control_error_and_resume() {
     let (mut client, mut proxy, session_id) = establish_capsule_session(2000);
 
     // Fill the control stream's flow-control window with datagram capsules until
-    // one is refused.
+    // one is refused; a refusal is an error, never a silent drop.
     let payload = vec![0x2c; 500];
     let mut refused = false;
     for _ in 0..100 {
