@@ -521,7 +521,7 @@ fn connect_udp_operation_on_fetch_stream() {
 
 #[test]
 fn session_lifecycle_with_http_datagram_capsule() {
-    let (mut client, mut proxy, session_id, proxy_session) = establish_capsule_session(None);
+    let (mut client, mut proxy, session_id, proxy_session) = establish_capsule_session(None, None);
 
     qinfo!("Testing Capsule send (client -> server)");
     client
@@ -718,6 +718,7 @@ fn outgoing_datagram_space_available_forwarded() {
 /// the client only `proxy_max_stream_data` bytes of control-stream flow control.
 fn establish_capsule_session(
     proxy_max_stream_data: Option<u64>,
+    client_max_stream_data: Option<u64>,
 ) -> (
     Http3Client,
     Http3Server,
@@ -732,10 +733,17 @@ fn establish_capsule_session(
     if let Some(v) = proxy_max_stream_data {
         proxy_params = proxy_params.max_stream_data(StreamType::BiDi, true, v);
     }
+    // `max_stream_data(BiDi, false, _)` is the window the client grants on the
+    // streams it opens, so it bounds what the proxy can send on the CONNECT
+    // stream.
+    let mut client_params = ConnectionParameters::default().datagram_size(0);
+    if let Some(v) = client_max_stream_data {
+        client_params = client_params.max_stream_data(StreamType::BiDi, false, v);
+    }
     let mut client = http3_client_with_params(
         Http3Parameters::default()
             .connect(true)
-            .connection_parameters(ConnectionParameters::default().datagram_size(0)),
+            .connection_parameters(client_params),
     );
     let mut proxy = http3_server_with_params(
         Http3Parameters::default()
@@ -804,7 +812,8 @@ fn establish_capsule_session(
 /// sender receives a resume event once the window reopens.
 #[test]
 fn datagram_capsule_flow_control_error_and_resume() {
-    let (mut client, mut proxy, session_id, _proxy_session) = establish_capsule_session(Some(2000));
+    let (mut client, mut proxy, session_id, _proxy_session) =
+        establish_capsule_session(Some(2000), None);
 
     // Fill the control stream's flow-control window with datagram capsules until
     // one is refused; a refusal is an error, never a silent drop.
@@ -839,5 +848,106 @@ fn datagram_capsule_flow_control_error_and_resume() {
             .events()
             .any(|e| matches!(e, Http3ClientEvent::OutgoingDatagramSpaceAvailable)),
         "resume event not emitted after control-stream flow control reopened"
+    );
+}
+
+/// `write_datagram_capsule` checks the control stream's send space against the
+/// datagram payload alone, but then writes the payload wrapped in a capsule
+/// header and a DATA frame header. With exactly the payload's worth of space
+/// left the send is accepted, yet only its head fits the window; the tail stays
+/// in the HTTP/3 send buffer, and nothing flushes it because the session is not
+/// registered as having pending data. The proxy never sees the datagram.
+#[test]
+fn datagram_capsule_accepted_without_room_is_stranded() {
+    const WINDOW: u64 = 3000;
+    let (mut client, mut proxy, session_id, _proxy_session) =
+        establish_capsule_session(Some(WINDOW), None);
+
+    // A refused capsule consumes no window, so walk the payload size down until
+    // one is accepted. Refusing `p + 1` while accepting `p` means the window
+    // holds exactly the payload plus its context ID, and not a byte more.
+    let mut payload_len = usize::try_from(WINDOW).unwrap();
+    loop {
+        let payload = vec![0x2c; payload_len];
+        match client.connect_udp_send_datagram(session_id, &payload, None, now()) {
+            Ok(true) => break,
+            Err(Error::FlowControlLimit) => payload_len -= 1,
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    let count = |proxy: &mut Http3Server| {
+        proxy
+            .events()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Http3ServerEvent::ConnectUdp(ServerEvent::Datagram { .. })
+                )
+            })
+            .count()
+    };
+    let max_stream_data_before = client.transport_stats().frame_rx.max_stream_data;
+    exchange_packets(&mut client, &mut proxy, false, None);
+    let received = count(&mut proxy);
+    // The proxy read the capsule's head and granted more credit, so the tail
+    // could have been flushed by now.
+    assert!(client.transport_stats().frame_rx.max_stream_data > max_stream_data_before);
+
+    // Only the next capsule pushes the stranded tail out.
+    assert_eq!(
+        client.connect_udp_send_datagram(session_id, PING, None, now()),
+        Ok(true)
+    );
+    exchange_packets(&mut client, &mut proxy, false, None);
+    let received_after_next = count(&mut proxy);
+
+    assert_eq!(
+        (received, received_after_next),
+        (1, 2),
+        "datagram accepted with Ok(true) did not reach the proxy until the next capsule flushed it"
+    );
+}
+
+/// The proxy sends datagram capsules too. When the CONNECT stream's
+/// flow-control window runs out, the server side must behave like the client
+/// side: refuse with `FlowControlLimit` rather than drop, and emit
+/// [`Http3ServerEvent::OutgoingDatagramSpaceAvailable`] once the window reopens.
+#[test]
+fn server_datagram_capsule_flow_control_error_and_resume() {
+    let (mut client, mut proxy, _session_id, proxy_session) =
+        establish_capsule_session(None, Some(2000));
+
+    let payload = vec![0x2c; 500];
+    let mut refused = false;
+    for _ in 0..100 {
+        match proxy_session.send_datagram(&payload, None, now()) {
+            Ok(_) => {}
+            Err(Error::FlowControlLimit) => {
+                refused = true;
+                break;
+            }
+            Err(e) => panic!("unexpected error: {e:?}"),
+        }
+    }
+    assert!(
+        refused,
+        "the CONNECT stream never reached its flow-control limit"
+    );
+    assert!(
+        !proxy
+            .events()
+            .any(|e| matches!(e, Http3ServerEvent::OutgoingDatagramSpaceAvailable { .. })),
+        "resume event fired before the window reopened"
+    );
+
+    // The client reads the buffered capsules and grants more credit, which must
+    // release the blocked proxy.
+    exchange_packets(&mut client, &mut proxy, false, None);
+    assert!(
+        proxy
+            .events()
+            .any(|e| matches!(e, Http3ServerEvent::OutgoingDatagramSpaceAvailable { .. })),
+        "resume event not emitted after the CONNECT stream reopened"
     );
 }
