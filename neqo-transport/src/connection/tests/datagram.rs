@@ -714,7 +714,9 @@ fn backpressure_respecting_sender_never_stalls() {
     let mut received: u64 = 0;
     let mut blocked = false;
 
-    for _ in 0..10_000 {
+    // Each iteration delivers at least one datagram, so `TOTAL` iterations are
+    // enough; a stall would leave `received` short and fail the assertion below.
+    for _ in 0..TOTAL {
         // Send while the queue accepts and we have not been told to stop.
         while !blocked && next_id <= TOTAL {
             let payload = vec![u8::try_from(next_id % 256).unwrap()];
