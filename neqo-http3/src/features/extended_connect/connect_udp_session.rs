@@ -134,8 +134,8 @@ impl Protocol for Session {
         dgram_data.encode(buf);
 
         if conn.stream_avail_send_space(self.session_id)? < dgram_data.len() {
-            qdebug!("Not enough space to send datagram capsule, dropping it.");
-            return Ok(());
+            qdebug!("[{self}] datagram capsule exceeds control-stream flow-control space");
+            return Err(Error::FlowControlLimit);
         }
         // TODO: Make Capsule abstract over either an owned (Bytes) or borrowed (&[u8]) type
         // to avoid this allocation.

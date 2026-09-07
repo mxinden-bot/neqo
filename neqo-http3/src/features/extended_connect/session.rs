@@ -396,7 +396,8 @@ impl Session {
     /// if it was queued but the outgoing QUIC datagram queue is now full and the
     /// producer should stop sending until it receives an
     /// [`OutgoingDatagramSpaceAvailable`] event (backpressure). Datagrams sent as
-    /// HTTP DATAGRAM Capsules always report `Ok(true)`; see
+    /// HTTP DATAGRAM Capsules report `Ok(true)` on success, or `FlowControlLimit`
+    /// if the control stream's flow-control window is exhausted; see
     /// [`Protocol::write_datagram_capsule`].
     ///
     /// [`OutgoingDatagramSpaceAvailable`]: crate::Http3ClientEvent::OutgoingDatagramSpaceAvailable
@@ -422,7 +423,8 @@ impl Session {
 
         if conn.remote_datagram_size() == 0 && self.protocol.datagram_capsule_support() {
             qtrace!("[{self}] remote_datagram_size is 0, trying HTTP DATAGRAM Capsule");
-            // The Capsule path does not report backpressure; see
+            // The Capsule path has no soft backpressure; it errors when the
+            // control stream's flow-control window is exhausted. See
             // `Protocol::write_datagram_capsule`.
             return self
                 .protocol
@@ -664,10 +666,11 @@ pub(crate) trait Protocol: Debug + Display {
 
     /// Write a datagram as an HTTP DATAGRAM Capsule to the control stream.
     ///
-    /// NOTE: On a full control stream this drops the datagram and still reports
-    /// success, so the Capsule path applies no backpressure. Unlike the QUIC
-    /// datagram queue, it neither reports "no space" nor emits a resume event.
-    /// To be fixed in the future.
+    /// Capsules are buffered on the control stream, so their limit is that
+    /// stream's flow-control window: a hard bound, unlike the soft outgoing QUIC
+    /// datagram queue with its backpressure signal. A write that would exceed the
+    /// window returns `FlowControlLimit` rather than dropping the datagram or
+    /// signalling backpressure; a successful write returns `Ok(())`.
     fn write_datagram_capsule(
         &self,
         _control_stream_send: &mut Box<dyn SendStream>,

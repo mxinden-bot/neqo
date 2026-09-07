@@ -784,3 +784,81 @@ fn outgoing_datagram_space_available_forwarded() {
         "OutgoingDatagramSpaceAvailable was not forwarded through connect-udp"
     );
 }
+
+/// A datagram capsule that would exceed the control stream's flow-control
+/// window returns an error instead of being silently dropped.
+#[test]
+fn datagram_capsule_flow_control_error() {
+    fixture_init();
+    neqo_common::log::init(None);
+
+    // `datagram_size(0)` forces the HTTP DATAGRAM Capsule path; the proxy grants
+    // the client only a small flow-control window on the control stream.
+    let mut client = http3_client_with_params(
+        Http3Parameters::default()
+            .connect(true)
+            .connection_parameters(ConnectionParameters::default().datagram_size(0)),
+    );
+    let mut proxy = http3_server_with_params(
+        Http3Parameters::default()
+            .connect(true)
+            .connection_parameters(
+                ConnectionParameters::default()
+                    .datagram_size(0)
+                    .max_stream_data(StreamType::BiDi, true, 2000),
+            ),
+    );
+
+    let out = test_fixture::connect_peers(&mut client, &mut proxy);
+    if let Some(dgram) = out
+        && let Some(dgram) = proxy.process(Some(dgram), now()).dgram()
+    {
+        client.process_input(dgram, now());
+    }
+
+    let session_id = client
+        .connect_udp_create_session(
+            now(),
+            &format!("https://[{}]:{}/", DEFAULT_ADDR.ip(), DEFAULT_ADDR.port())
+                .parse::<Uri>()
+                .unwrap(),
+            &[],
+        )
+        .unwrap();
+
+    exchange_packets(&mut client, &mut proxy, false, None);
+
+    proxy
+        .events()
+        .find_map(|event| {
+            if let Http3ServerEvent::ConnectUdp(ServerEvent::NewSession { session, .. }) = event {
+                session
+                    .response(&SessionAcceptAction::Accept, now())
+                    .unwrap();
+                Some(session)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+
+    exchange_packets(&mut client, &mut proxy, false, None);
+
+    client
+        .events()
+        .find(|e| {
+            matches!(
+            e,
+            Http3ClientEvent::ConnectUdp(ConnectUdpEvent::NewSession { stream_id, status, .. })
+                if *stream_id == session_id && *status == 200)
+        })
+        .unwrap();
+
+    // Far larger than the control stream's flow-control window, so it cannot be
+    // written as a Capsule and is reported as an error, not silently dropped.
+    let too_big = vec![0x2c; 100_000];
+    assert_eq!(
+        client.connect_udp_send_datagram(session_id, &too_big, None, now()),
+        Err(Error::FlowControlLimit)
+    );
+}
