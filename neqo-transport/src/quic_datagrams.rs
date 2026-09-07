@@ -4,17 +4,15 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Outbound QUIC datagram queueing and backpressure.
+//! Outbound QUIC datagram queueing and backpressure:
 //!
-//! Outgoing datagrams wait in a queue until they fit into a packet.
 //! [`QuicDatagrams::add_datagram`] queues the datagram (unless it exceeds the
 //! peer's datagram-size limit) and reports whether the queue still had room:
 //! `Ok(true)` if so, or `Ok(false)` once a send has filled it. `Ok(false)` is a
 //! high-watermark signal to stop, not a rejection: the datagram is still queued
-//! and nothing already queued is dropped, so an application that ignores it just
-//! grows the queue further. A single [`OutgoingDatagramSpaceAvailable`] event
-//! fires once the queue drops back below capacity, whether a slot was freed by
-//! sending a datagram or by dropping one too big for any packet.
+//! and nothing already queued is dropped. A single [`OutgoingDatagramSpaceAvailable`]
+//! event fires once the queue drops back below capacity, whether a slot was freed
+//! by sending a datagram or by dropping one too big for any packet.
 //!
 //! [`OutgoingDatagramSpaceAvailable`]: crate::ConnectionEvent::OutgoingDatagramSpaceAvailable
 

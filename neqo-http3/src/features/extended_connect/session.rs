@@ -446,6 +446,7 @@ impl Session {
             if matches!(res, Err(Error::FlowControlLimit)) {
                 self.datagram_capsule_blocked = true;
             }
+            // Fullness is reported by the error above, never as `Ok(false)`.
             return res.map(|()| true);
         }
 
@@ -686,11 +687,13 @@ pub(crate) trait Protocol: Debug + Display {
     /// Write a datagram as an HTTP DATAGRAM Capsule to the control stream.
     ///
     /// Capsules are buffered on the control stream, so their limit is that
-    /// stream's flow-control window rather than the soft outgoing QUIC datagram
-    /// queue. A write that would exceed the window returns `FlowControlLimit`
-    /// instead of dropping the datagram, and arms a writable notification so an
-    /// `OutgoingDatagramSpaceAvailable` event fires once the stream can hold a
-    /// capsule again; a successful write returns `Ok(())`.
+    /// stream's flow-control window. A write that would exceed the window returns
+    /// [`FlowControlLimit`] instead of dropping the datagram, and arms a writable
+    /// notification so an [`OutgoingDatagramSpaceAvailable`] event fires once the
+    /// stream can hold a capsule again; a successful write returns `Ok(())`.
+    ///
+    /// [`FlowControlLimit`]: crate::Error::FlowControlLimit
+    /// [`OutgoingDatagramSpaceAvailable`]: crate::Http3ClientEvent::OutgoingDatagramSpaceAvailable
     fn write_datagram_capsule(
         &self,
         _control_stream_send: &mut Box<dyn SendStream>,
