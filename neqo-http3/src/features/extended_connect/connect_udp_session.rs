@@ -6,6 +6,7 @@
 
 use std::{
     fmt::{self, Display, Formatter},
+    num::NonZeroUsize,
     time::Instant,
 };
 
@@ -134,8 +135,12 @@ impl Protocol for Session {
         dgram_data.encode(buf);
 
         if conn.stream_avail_send_space(self.session_id)? < dgram_data.len() {
-            qdebug!("Not enough space to send datagram capsule, dropping it.");
-            return Ok(());
+            qdebug!("[{self}] datagram capsule exceeds control-stream flow-control space");
+            // Ask to be told when the stream can hold a capsule this size again.
+            if let Some(watermark) = NonZeroUsize::new(dgram_data.len()) {
+                conn.stream_set_writable_event_low_watermark(self.session_id, watermark)?;
+            }
+            return Err(Error::FlowControlLimit);
         }
         // TODO: Make Capsule abstract over either an owned (Bytes) or borrowed (&[u8]) type
         // to avoid this allocation.
