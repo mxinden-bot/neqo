@@ -939,3 +939,42 @@ fn datagram_capsule_larger_than_stream_window_unblocks() {
         "the sender waits forever: the armed watermark is larger than the window can ever be"
     );
 }
+
+/// The reported maximum datagram size must be usable on a connect-udp session.
+///
+/// `webtransport_max_datagram_size` is the only accessor there is, and it
+/// subtracts the session-id varint from the connection's maximum but not the
+/// context-id varint that `connect_udp_session::Session::write_datagram_prefix`
+/// adds to every connect-udp datagram. WebTransport writes no prefix, so the
+/// figure is right there and one byte too large here, and a sender that sizes
+/// its datagrams by it gets `TooMuchData` on the largest one it is told it may
+/// send.
+#[test]
+fn connect_udp_max_datagram_size_is_usable() {
+    let (mut client, mut proxy, session_id, _proxy_session) =
+        establish_new_session_with_client_params(
+            ConnectionParameters::default()
+                .pmtud(true)
+                .datagram_size(1500),
+        );
+
+    let max = usize::try_from(client.webtransport_max_datagram_size(session_id).unwrap()).unwrap();
+    assert_eq!(
+        client.connect_udp_send_datagram(session_id, &vec![0x2c; max], None::<u64>, now()),
+        Ok(true),
+        "a datagram of exactly the reported maximum ({max}) was refused"
+    );
+
+    exchange_packets(&mut client, &mut proxy, false, None);
+    assert_eq!(
+        proxy
+            .events()
+            .filter(|e| matches!(
+                e,
+                Http3ServerEvent::ConnectUdp(ServerEvent::Datagram { .. })
+            ))
+            .count(),
+        1,
+        "the maximum-sized datagram was not delivered"
+    );
+}
