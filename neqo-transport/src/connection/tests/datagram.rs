@@ -718,16 +718,11 @@ fn backpressure_respecting_sender_never_stalls() {
         // Send while the queue accepts and we have not been told to stop.
         while !blocked && next_id <= TOTAL {
             let payload = vec![u8::try_from(next_id % 256).unwrap()];
-            match client.send_datagram(payload, Some(next_id)) {
-                // Queued with space remaining.
-                Ok(true) => next_id += 1,
-                // Queued, but the queue is now full: stop until resumed.
-                Ok(false) => {
-                    next_id += 1;
-                    blocked = true;
-                }
-                Err(e) => panic!("unexpected send error: {e:?}"),
-            }
+            // `false` means the queue is now full: stop until resumed.
+            blocked = !client
+                .send_datagram(payload, Some(next_id))
+                .expect("unexpected send error");
+            next_id += 1;
         }
 
         // Move one datagram-bearing packet to the server, if any.
