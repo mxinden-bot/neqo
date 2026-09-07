@@ -736,7 +736,7 @@ fn backpressure_respecting_sender_never_stalls() {
         }
 
         // Count everything the server received.
-        while let Some(event) = server.next_event() {
+        for event in server.events() {
             if matches!(event, ConnectionEvent::Datagram(_)) {
                 received += 1;
             }
