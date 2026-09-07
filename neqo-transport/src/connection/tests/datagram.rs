@@ -914,3 +914,75 @@ fn datagram_fill_gap4() {
     datagram_overfill(&mut client, &mut server, 4);
     assert!(*called.borrow());
 }
+
+/// A queued datagram must not be discarded as "too big" when it is only too big
+/// for what is left of the congestion window.
+///
+/// `write_frames` drops a datagram that does not fit the packet under
+/// construction whenever nothing else has been written yet. The packet's limit
+/// is `SendProfile::new_limited(cwnd_avail)`, so once a burst has filled the
+/// congestion window that limit is the window remainder, not the PMTU, and
+/// perfectly sendable datagrams are destroyed. The application is told
+/// `DroppedTooBig`, whose documented remedy is to consult `max_datagram_size`
+/// and send smaller datagrams, which would not have helped.
+///
+/// This contradicts the back-pressure contract: nothing already queued is
+/// supposed to be dropped, and a slot is supposed to be freed by a drop only
+/// when the datagram is too big for any packet.
+#[test]
+fn queued_datagram_not_dropped_as_too_big_when_congestion_limited() {
+    const N: usize = 60;
+    const LEN: usize = 800;
+    const_assert!(LEN < DATAGRAM_LEN_MTU);
+
+    let mut client = new_client(
+        ConnectionParameters::default()
+            .datagram_size(QuicDatagram::MAX_SIZE)
+            .outgoing_datagram_queue(N),
+    );
+    let mut server =
+        new_server(ConnectionParameters::default().datagram_size(QuicDatagram::MAX_SIZE));
+    connect_force_idle(&mut client, &mut server);
+
+    // This size fits a packet on its own, so nothing below is about the datagram
+    // being too large.
+    send_datagram(&mut client, &mut server, vec![7; LEN]);
+    assert_eq!(client.stats().datagram_tx.dropped_too_big, 0);
+
+    // A burst that fills the congestion window, which is what an application
+    // that does not stop on `Ok(false)` produces now that nothing bounds the
+    // queue. No acknowledgement can arrive for at least a round trip, so the
+    // window stays shut for the whole of the loop below: this is the first
+    // round trip after the burst, not a contrived stall.
+    for i in 0..N {
+        client
+            .send_datagram(vec![1; LEN], Some(u64::try_from(i).unwrap()))
+            .unwrap();
+    }
+
+    // Count separately the drops that happen on a call producing no packet at
+    // all, where the datagram was not competing with anything.
+    let mut dropped_for_no_packet = 0;
+    let mut t = now();
+    for _ in 0..200 {
+        let before = client.stats().datagram_tx.dropped_too_big;
+        let out = client.process_output(t);
+        let dropped = client.stats().datagram_tx.dropped_too_big - before;
+        if let Some(out) = out.dgram() {
+            server.process_input(out, t);
+        } else {
+            dropped_for_no_packet += dropped;
+            t += AT_LEAST_PTO;
+        }
+    }
+
+    assert_eq!(
+        client.stats().datagram_tx.dropped_too_big,
+        0,
+        "{} of {N} queued {LEN} byte datagrams were dropped as too big \
+         ({dropped_for_no_packet} of them on a call that emitted no packet at all), \
+         {} were sent",
+        client.stats().datagram_tx.dropped_too_big,
+        client.stats().frame_tx.datagram,
+    );
+}
