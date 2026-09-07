@@ -12,7 +12,7 @@ use std::{
     time::Instant,
 };
 
-use neqo_common::{Bytes, Encoder, Header, MessageType, Role, qdebug, qtrace};
+use neqo_common::{Bytes, Encoder, Header, MessageType, Role, qdebug, qtrace, to_u64};
 use neqo_transport::{AppError, Connection, DatagramTracking, StreamId, streams::SendGroupId};
 use rustc_hash::FxHashSet as HashSet;
 
@@ -390,6 +390,19 @@ impl Session {
         self.control_stream_send.send_data(conn, buf, now)
     }
 
+    /// The largest datagram payload this session can send, i.e. the
+    /// connection's maximum less everything [`Self::send_datagram`] puts in
+    /// front of the payload: the session id and the protocol's prefix.
+    ///
+    /// # Errors
+    ///
+    /// `NotAvailable` if datagrams are not enabled.
+    pub(crate) fn max_datagram_size(&self, conn: &Connection) -> Res<u64> {
+        let overhead =
+            Encoder::varint_len(self.id.as_u64() / 4) + self.protocol.datagram_prefix_len();
+        Ok(conn.max_datagram_size()?.saturating_sub(to_u64(overhead)))
+    }
+
     /// # Errors
     ///
     /// Returns an error if:
@@ -644,6 +657,14 @@ pub(crate) trait Protocol: Debug + Display {
     }
 
     fn write_datagram_prefix(&self, encoder: &mut Encoder);
+
+    /// The number of bytes [`Self::write_datagram_prefix`] puts in front of a
+    /// datagram. Derived from the prefix itself so the two cannot drift apart.
+    fn datagram_prefix_len(&self) -> usize {
+        let mut encoder = Encoder::default();
+        self.write_datagram_prefix(&mut encoder);
+        encoder.len()
+    }
 
     fn dgram_context_id(&self, datagram: Bytes) -> Result<Bytes, DgramContextIdError>;
 

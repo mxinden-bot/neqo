@@ -1630,6 +1630,26 @@ impl Http3Connection {
         Ok(())
     }
 
+    /// The largest datagram payload the session can send.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidStreamId` if the session does not exist or does not use
+    /// `connect_type`, `NotAvailable` if datagrams are not enabled.
+    pub(crate) fn extended_connect_max_datagram_size(
+        &self,
+        session_id: StreamId,
+        conn: &Connection,
+        connect_type: ExtendedConnectType,
+    ) -> Res<u64> {
+        let session = self.get_extended_connect_session(session_id)?;
+        let session = session.borrow();
+        if session.connect_type() != connect_type {
+            return Err(Error::InvalidStreamId);
+        }
+        session.max_datagram_size(conn)
+    }
+
     pub(crate) fn extended_connect_send_datagram<I: Into<DatagramTracking>>(
         &self,
         session_id: StreamId,

@@ -60,6 +60,16 @@ pub trait ClientSession {
         now: Instant,
     ) -> Res<()>;
 
+    /// The largest datagram [`ClientSession::connect_udp_send_datagram`] accepts
+    /// right now. It changes over time with the encoded size of the packet
+    /// number, ack frames and so on.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidStreamId`] if the session does not exist or is not a
+    /// connect-udp session, `NotAvailable` if datagrams are not enabled.
+    fn connect_udp_max_datagram_size(&self, session_id: StreamId) -> Res<u64>;
+
     /// Send a connect-udp datagram.
     ///
     /// # Errors
@@ -110,6 +120,14 @@ impl ClientSession for Http3Client {
     ) -> Res<()> {
         let (conn, handler) = self.connection_and_handler();
         handler.connect_udp_close_session(conn, session_id, error, message, now)
+    }
+
+    fn connect_udp_max_datagram_size(&self, session_id: StreamId) -> Res<u64> {
+        self.handler().extended_connect_max_datagram_size(
+            session_id,
+            self.connection(),
+            extended_connect::ExtendedConnectType::ConnectUdp,
+        )
     }
 
     fn connect_udp_send_datagram<I: Into<DatagramTracking>>(

@@ -716,3 +716,49 @@ fn connect_udp_session_rejected_by_webtransport_create_stream() {
         Err(Error::InvalidStreamId)
     );
 }
+
+/// A datagram of exactly the reported maximum size has to be accepted.
+///
+/// The size has to account for everything the session puts in front of the
+/// payload, which for connect-udp is the session id and the context ID, not
+/// just the session id.
+///
+/// <https://datatracker.ietf.org/doc/html/rfc9298#name-context-identifiers>
+#[test]
+fn max_datagram_size_accounts_for_context_id() {
+    let (mut client, mut proxy, session_id, _proxy_session) = establish_new_session();
+
+    let max = usize::try_from(client.connect_udp_max_datagram_size(session_id).unwrap()).unwrap();
+    assert_eq!(
+        client.connect_udp_send_datagram(session_id, &vec![0x2c; max], None::<u64>, now()),
+        Ok(()),
+        "a datagram of exactly the reported maximum ({max}) was refused"
+    );
+
+    exchange_packets(&mut client, &mut proxy, false, None);
+    assert_eq!(
+        proxy
+            .events()
+            .filter(|e| matches!(
+                e,
+                Http3ServerEvent::ConnectUdp(ServerEvent::Datagram { .. })
+            ))
+            .count(),
+        1,
+        "the maximum-sized datagram was not delivered"
+    );
+}
+
+/// `webtransport_max_datagram_size` must not accept a connect-udp session id
+/// just because it happens to share the extended-CONNECT session
+/// machinery with WebTransport. It does not account for the context ID, so the
+/// figure it would return is one byte too large.
+#[test]
+fn connect_udp_session_rejected_by_webtransport_max_datagram_size() {
+    fixture_init();
+    let (client, _proxy, session_id, _proxy_session) = establish_new_session();
+    assert_eq!(
+        client.webtransport_max_datagram_size(session_id),
+        Err(Error::InvalidStreamId)
+    );
+}

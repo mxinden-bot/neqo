@@ -55,7 +55,9 @@ pub trait ClientSession {
     ///
     /// # Errors
     ///
-    /// The function returns `NotAvailable` if datagrams are not enabled.
+    /// The function returns `InvalidStreamId` if the session does not exist or
+    /// is not a `WebTransport` session, and `NotAvailable` if datagrams are not
+    /// enabled.
     ///
     /// # Panics
     ///
@@ -208,11 +210,11 @@ impl ClientSession for Http3Client {
     }
 
     fn webtransport_max_datagram_size(&self, session_id: StreamId) -> Res<u64> {
-        let qsid_len = Encoder::varint_len(session_id.as_u64() >> 2);
-        Ok(self
-            .connection()
-            .max_datagram_size()?
-            .saturating_sub(to_u64(qsid_len)))
+        self.handler().extended_connect_max_datagram_size(
+            session_id,
+            self.connection(),
+            extended_connect::ExtendedConnectType::WebTransport,
+        )
     }
 
     fn webtransport_set_sendorder(
