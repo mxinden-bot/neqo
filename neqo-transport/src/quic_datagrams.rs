@@ -218,3 +218,41 @@ impl QuicDatagrams {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::{DatagramTracking, QuicDatagrams};
+    use crate::ConnectionEvents;
+
+    const CAPACITY: usize = 2;
+
+    fn datagrams() -> QuicDatagrams {
+        let mut d = QuicDatagrams::new(1500, CAPACITY, ConnectionEvents::default());
+        d.set_remote_datagram_size(1500);
+        d
+    }
+
+    /// The queue is documented as staying a fixed length, with `Ok(false)` as a
+    /// high-watermark signal. Nothing enforces that length: a producer that
+    /// keeps sending grows the queue without bound, so outgoing datagrams are no
+    /// longer capped by `max_queued_outgoing_datagrams`.
+    #[test]
+    fn queue_length_is_bounded_by_capacity() {
+        const SENDS: usize = 10_000;
+
+        let mut d = datagrams();
+        for _ in 0..SENDS {
+            // Never an error, and after the first `CAPACITY` sends never `true`.
+            d.add_datagram(vec![0; 1000], DatagramTracking::None)
+                .unwrap();
+        }
+
+        assert!(
+            d.datagrams.len() <= CAPACITY + 1,
+            "queue holds {} datagrams ({} bytes) with a capacity of {CAPACITY}",
+            d.datagrams.len(),
+            d.datagrams.iter().map(|q| q.data.len()).sum::<usize>(),
+        );
+    }
+}

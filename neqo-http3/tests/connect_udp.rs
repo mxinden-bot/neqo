@@ -841,3 +841,101 @@ fn datagram_capsule_flow_control_error_and_resume() {
         "resume event not emitted after control-stream flow control reopened"
     );
 }
+
+/// Every datagram capsule the client accepts must reach the proxy.
+///
+/// `write_datagram_capsule` guards the control stream's flow-control window by
+/// comparing `stream_avail_send_space` against the datagram payload length, but
+/// the bytes it then writes are the payload wrapped in a DATAGRAM capsule (type
+/// varint plus length varint) wrapped in an HTTP/3 DATA frame (type varint plus
+/// length varint), so the guard under-counts by at least four bytes. When the
+/// remaining window sits in that gap the capsule passes the guard, is only
+/// partly written, and the tail is left in the HTTP/3 send buffer of a session
+/// that is not registered for sending. The datagram is silently lost, which is
+/// the failure this change set out to remove.
+///
+/// The payload size is swept because the boundary depends on how much of the
+/// window the CONNECT request consumed.
+#[test]
+fn datagram_capsule_accepted_at_flow_control_boundary_is_delivered() {
+    const WINDOW: u64 = 2000;
+
+    for size in 1..=8_usize {
+        let (mut client, mut proxy, session_id, _proxy_session) =
+            establish_capsule_session(Some(WINDOW));
+
+        // Fill the control stream's window; a refusal is the documented signal
+        // to stop, so the sender stops there.
+        let payload = vec![0x2c; size];
+        let mut accepted = 0;
+        for _ in 0..5000 {
+            match client.connect_udp_send_datagram(session_id, &payload, None::<u64>, now()) {
+                Ok(_) => accepted += 1,
+                Err(Error::FlowControlLimit) => break,
+                Err(e) => panic!("payload {size}: unexpected error: {e:?}"),
+            }
+        }
+        assert!(accepted > 0, "payload {size}: nothing was accepted");
+
+        for _ in 0..10 {
+            exchange_packets(&mut client, &mut proxy, false, None);
+        }
+
+        let received = proxy
+            .events()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Http3ServerEvent::ConnectUdp(ServerEvent::Datagram { .. })
+                )
+            })
+            .count();
+        assert_eq!(
+            received, accepted,
+            "payload {size}: proxy received {received} of the {accepted} capsules the client accepted"
+        );
+    }
+}
+
+/// A capsule that can never fit the control stream's flow-control window must
+/// not leave the sender waiting for a resume event that cannot happen.
+///
+/// On refusal `write_datagram_capsule` arms a writable watermark of the capsule
+/// size and returns `FlowControlLimit`, which the sender is told to treat as
+/// "wait for `OutgoingDatagramSpaceAvailable`". If the datagram is larger than
+/// the peer's `max_stream_data` for the control stream, the watermark can never
+/// be reached, so no event ever fires and that datagram is stuck forever. The
+/// session itself is healthy: a smaller datagram still goes through.
+#[test]
+fn datagram_capsule_larger_than_stream_window_unblocks() {
+    let (mut client, mut proxy, session_id, _proxy_session) = establish_capsule_session(Some(600));
+
+    let res = client.connect_udp_send_datagram(session_id, &[0x2c; 1000], None::<u64>, now());
+    let Err(Error::FlowControlLimit) = res else {
+        // Reporting the datagram as permanently unsendable is fine; only "retry
+        // once you are told there is space" is not.
+        return;
+    };
+
+    let mut resumed = false;
+    for _ in 0..200 {
+        exchange_packets(&mut client, &mut proxy, false, None);
+        if client
+            .events()
+            .any(|e| matches!(e, Http3ClientEvent::OutgoingDatagramSpaceAvailable))
+        {
+            resumed = true;
+            break;
+        }
+    }
+
+    // The session is otherwise usable, so this is not a dead connection.
+    assert_eq!(
+        client.connect_udp_send_datagram(session_id, PING, None::<u64>, now()),
+        Ok(true)
+    );
+    assert!(
+        resumed,
+        "the sender waits forever: the armed watermark is larger than the window can ever be"
+    );
+}
