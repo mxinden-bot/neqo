@@ -77,8 +77,7 @@ pub enum ConnectionEvent {
         id: u64,
         outcome: OutgoingDatagramOutcome,
     },
-    /// Space has become available in the outgoing QUIC datagram queue after it
-    /// was full. The application can resume sending QUIC datagrams.
+    /// The outgoing QUIC datagram queue has space again after having been full.
     OutgoingDatagramSpaceAvailable,
     /// An update was received to SCONE throughput advice.
     /// The value is the approximate rate in bits per second; None = unknown.
