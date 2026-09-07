@@ -785,15 +785,15 @@ fn outgoing_datagram_space_available_forwarded() {
     );
 }
 
-/// A datagram capsule that would exceed the control stream's flow-control
-/// window returns an error instead of being silently dropped.
-#[test]
-fn datagram_capsule_flow_control_error() {
+/// Establish a connect-udp session over the HTTP DATAGRAM Capsule path, granting
+/// the client only `proxy_max_stream_data` bytes of control-stream flow control.
+fn establish_capsule_session(
+    proxy_max_stream_data: u64,
+) -> (Http3Client, Http3Server, neqo_http3::StreamId) {
     fixture_init();
     neqo_common::log::init(None);
 
-    // `datagram_size(0)` forces the HTTP DATAGRAM Capsule path; the proxy grants
-    // the client only a small flow-control window on the control stream.
+    // `datagram_size(0)` forces the HTTP DATAGRAM Capsule path.
     let mut client = http3_client_with_params(
         Http3Parameters::default()
             .connect(true)
@@ -805,7 +805,7 @@ fn datagram_capsule_flow_control_error() {
             .connection_parameters(
                 ConnectionParameters::default()
                     .datagram_size(0)
-                    .max_stream_data(StreamType::BiDi, true, 2000),
+                    .max_stream_data(StreamType::BiDi, true, proxy_max_stream_data),
             ),
     );
 
@@ -848,11 +848,20 @@ fn datagram_capsule_flow_control_error() {
         .events()
         .find(|e| {
             matches!(
-            e,
-            Http3ClientEvent::ConnectUdp(ConnectUdpEvent::NewSession { stream_id, status, .. })
-                if *stream_id == session_id && *status == 200)
+                e,
+                Http3ClientEvent::ConnectUdp(ConnectUdpEvent::NewSession { stream_id, status, .. })
+                    if *stream_id == session_id && *status == 200)
         })
         .unwrap();
+
+    (client, proxy, session_id)
+}
+
+/// A datagram capsule that would exceed the control stream's flow-control
+/// window returns an error instead of being silently dropped.
+#[test]
+fn datagram_capsule_flow_control_error() {
+    let (mut client, _proxy, session_id) = establish_capsule_session(2000);
 
     // Far larger than the control stream's flow-control window, so it cannot be
     // written as a Capsule and is reported as an error, not silently dropped.
@@ -860,5 +869,47 @@ fn datagram_capsule_flow_control_error() {
     assert_eq!(
         client.connect_udp_send_datagram(session_id, &too_big, None, now()),
         Err(Error::FlowControlLimit)
+    );
+}
+
+/// Once the control stream's flow-control window reopens, a sender that was
+/// refused with `FlowControlLimit` receives a resume event.
+#[test]
+fn datagram_capsule_flow_control_resumes() {
+    let (mut client, mut proxy, session_id) = establish_capsule_session(2000);
+
+    // Fill the control stream's flow-control window with datagram capsules until
+    // one is refused.
+    let payload = vec![0x2c; 500];
+    let mut refused = false;
+    for _ in 0..100 {
+        match client.connect_udp_send_datagram(session_id, &payload, None, now()) {
+            Ok(_) => {}
+            Err(Error::FlowControlLimit) => {
+                refused = true;
+                break;
+            }
+            Err(e) => panic!("unexpected error: {e:?}"),
+        }
+    }
+    assert!(
+        refused,
+        "the control stream never reached its flow-control limit"
+    );
+    assert!(
+        !client
+            .events()
+            .any(|e| matches!(e, Http3ClientEvent::OutgoingDatagramSpaceAvailable)),
+        "resume event fired before the window reopened"
+    );
+
+    // The proxy reads the buffered capsules and grants more flow-control credit,
+    // reopening the control stream, which must surface the resume event.
+    exchange_packets(&mut client, &mut proxy, false, None);
+    assert!(
+        client
+            .events()
+            .any(|e| matches!(e, Http3ClientEvent::OutgoingDatagramSpaceAvailable)),
+        "resume event not emitted after control-stream flow control reopened"
     );
 }

@@ -56,6 +56,9 @@ pub(crate) trait ExtendedConnectEvents: Debug {
         datagram: Bytes,
         connect_type: ExtendedConnectType,
     );
+    /// The control stream has flow-control space again after a datagram capsule
+    /// was refused with `FlowControlLimit`, so the sender can resume.
+    fn datagram_space_available(&self);
 }
 
 #[derive(Debug, PartialEq, Copy, Clone, Eq, strum::Display)]

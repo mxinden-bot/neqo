@@ -61,6 +61,9 @@ pub(crate) struct Session {
     /// CONNECT request.
     protocol: Box<dyn Protocol>,
     draining: bool,
+    /// Set when a datagram capsule was refused with `FlowControlLimit`, so a
+    /// resume event fires once the control stream is writable again.
+    datagram_capsule_blocked: bool,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -120,6 +123,7 @@ impl Session {
             events,
             protocol,
             draining: false,
+            datagram_capsule_blocked: false,
         }
     }
 
@@ -150,6 +154,7 @@ impl Session {
             events,
             protocol,
             draining: false,
+            datagram_capsule_blocked: false,
         })
     }
 
@@ -226,6 +231,15 @@ impl Session {
             self.state = State::Done;
         }
         Ok(())
+    }
+
+    fn stream_writable(&mut self) {
+        // The control stream has flow-control space again; if a datagram capsule
+        // was refused, tell the sender it can resume.
+        if self.datagram_capsule_blocked {
+            self.datagram_capsule_blocked = false;
+            self.events.datagram_space_available();
+        }
     }
 
     fn close(&mut self, close_type: CloseType) {
@@ -423,13 +437,16 @@ impl Session {
 
         if conn.remote_datagram_size() == 0 && self.protocol.datagram_capsule_support() {
             qtrace!("[{self}] remote_datagram_size is 0, trying HTTP DATAGRAM Capsule");
-            // The Capsule path has no soft backpressure; it errors when the
-            // control stream's flow-control window is exhausted. See
-            // `Protocol::write_datagram_capsule`.
-            return self
-                .protocol
-                .write_datagram_capsule(&mut self.control_stream_send, conn, buf, now)
-                .map(|()| true);
+            // The Capsule path errors when the control stream's flow-control
+            // window is exhausted, then emits a resume event once the stream is
+            // writable again (see `stream_writable`).
+            let res =
+                self.protocol
+                    .write_datagram_capsule(&mut self.control_stream_send, conn, buf, now);
+            if matches!(res, Err(Error::FlowControlLimit)) {
+                self.datagram_capsule_blocked = true;
+            }
+            return res.map(|()| true);
         }
 
         let mut dgram_data = Encoder::default();
@@ -551,7 +568,9 @@ impl SendStream for Rc<RefCell<Session>> {
         self.borrow_mut().has_data_to_send()
     }
 
-    fn stream_writable(&self) {}
+    fn stream_writable(&self) {
+        self.borrow_mut().stream_writable();
+    }
 
     fn done(&self) -> bool {
         self.borrow_mut().done()
@@ -667,10 +686,11 @@ pub(crate) trait Protocol: Debug + Display {
     /// Write a datagram as an HTTP DATAGRAM Capsule to the control stream.
     ///
     /// Capsules are buffered on the control stream, so their limit is that
-    /// stream's flow-control window: a hard bound, unlike the soft outgoing QUIC
-    /// datagram queue with its backpressure signal. A write that would exceed the
-    /// window returns `FlowControlLimit` rather than dropping the datagram or
-    /// signalling backpressure; a successful write returns `Ok(())`.
+    /// stream's flow-control window rather than the soft outgoing QUIC datagram
+    /// queue. A write that would exceed the window returns `FlowControlLimit`
+    /// instead of dropping the datagram, and arms a writable notification so an
+    /// `OutgoingDatagramSpaceAvailable` event fires once the stream can hold a
+    /// capsule again; a successful write returns `Ok(())`.
     fn write_datagram_capsule(
         &self,
         _control_stream_send: &mut Box<dyn SendStream>,

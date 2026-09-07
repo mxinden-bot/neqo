@@ -17,6 +17,7 @@ use crate::{
     Error, Http3Parameters, Http3StreamType, NewStreamType, Priority, PriorityHandler,
     ReceiveOutput, Res,
     connection::{Http3Connection, Http3State},
+    features::extended_connect::ExtendedConnectEvents as _,
     frames::HFrame,
     recv_message::{RecvMessage, RecvMessageInfo},
     send_message::SendMessage,
