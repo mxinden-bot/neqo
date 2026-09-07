@@ -77,28 +77,35 @@ fn max_datagram_size_smaller_than_session_prefix() {
     assert_eq!(wt.max_datagram_size(wt_session.stream_id()), Ok(0));
 }
 
-/// Filling the client's outgoing QUIC datagram queue and then draining it must
-/// surface [`OutgoingDatagramSpaceAvailable`].
-///
-/// [`OutgoingDatagramSpaceAvailable`]: crate::Http3ClientEvent::OutgoingDatagramSpaceAvailable
+/// Draining a full outgoing QUIC datagram queue must surface the resume event
+/// on both sides: [`Http3ClientEvent::OutgoingDatagramSpaceAvailable`] to the
+/// client and [`Http3ServerEvent::OutgoingDatagramSpaceAvailable`] to the
+/// server.
 #[test]
 fn outgoing_datagram_space_available_forwarded() {
-    let mut wt = WtTest::new_with_params(
+    let params = || {
         wt_default_parameters().connection_parameters(
             ConnectionParameters::default()
                 .datagram_size(DATAGRAM_SIZE)
                 .outgoing_datagram_queue(1),
-        ),
-        wt_default_parameters(),
-    );
+        )
+    };
+    let mut wt = WtTest::new_with_params(params(), params());
     let wt_session = wt.create_wt_session();
 
     assert_eq!(wt.send_datagram(wt_session.stream_id(), DGRAM), Ok(false));
+    assert_eq!(wt_session.send_datagram(DGRAM, None, now()), Ok(false));
     assert!(
         !wt.client
             .events()
             .any(|e| matches!(e, Http3ClientEvent::OutgoingDatagramSpaceAvailable)),
-        "resume event fired before the queue drained"
+        "client resume event fired before the queue drained"
+    );
+    assert!(
+        !wt.server
+            .events()
+            .any(|e| matches!(e, Http3ServerEvent::OutgoingDatagramSpaceAvailable { .. })),
+        "server resume event fired before the queue drained"
     );
 
     wt.exchange_packets();
@@ -108,34 +115,6 @@ fn outgoing_datagram_space_available_forwarded() {
             .any(|e| matches!(e, Http3ClientEvent::OutgoingDatagramSpaceAvailable)),
         "OutgoingDatagramSpaceAvailable was not forwarded to the HTTP/3 client"
     );
-}
-
-/// The server side must forward the resume signal too. Filling the server's
-/// outgoing QUIC datagram queue and then draining it has to surface
-/// [`OutgoingDatagramSpaceAvailable`].
-///
-/// [`OutgoingDatagramSpaceAvailable`]: crate::Http3ServerEvent::OutgoingDatagramSpaceAvailable
-#[test]
-fn outgoing_datagram_space_available_forwarded_server() {
-    let mut wt = WtTest::new_with_params(
-        wt_default_parameters(),
-        wt_default_parameters().connection_parameters(
-            ConnectionParameters::default()
-                .datagram_size(DATAGRAM_SIZE)
-                .outgoing_datagram_queue(1),
-        ),
-    );
-    let wt_session = wt.create_wt_session();
-
-    assert_eq!(wt_session.send_datagram(DGRAM, None, now()), Ok(false));
-    assert!(
-        !wt.server
-            .events()
-            .any(|e| matches!(e, Http3ServerEvent::OutgoingDatagramSpaceAvailable { .. })),
-        "server resume event fired before the queue drained"
-    );
-
-    wt.exchange_packets();
     assert!(
         wt.server
             .events()

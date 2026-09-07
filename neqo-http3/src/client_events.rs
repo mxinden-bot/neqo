@@ -116,7 +116,6 @@ pub enum Http3ClientEvent {
     /// `ConnectUdp` events
     ConnectUdp(ConnectUdpEvent),
     /// The outgoing QUIC datagram queue has space again after having been full.
-    /// The application can resume sending HTTP/3 datagrams.
     OutgoingDatagramSpaceAvailable,
 }
 

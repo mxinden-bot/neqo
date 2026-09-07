@@ -277,9 +277,7 @@ pub enum Http3ServerEvent {
         stream_id: StreamId,
         priority: Priority,
     },
-    /// The outgoing QUIC datagram queue has space again after having been full,
-    /// so a session on this connection that received backpressure (a `false`
-    /// return from `send_datagram`) can resume sending.
+    /// The outgoing QUIC datagram queue has space again after having been full.
     OutgoingDatagramSpaceAvailable {
         conn: ConnectionRef,
     },

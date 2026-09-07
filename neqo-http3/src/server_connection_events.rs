@@ -44,8 +44,7 @@ pub enum Http3ServerConnEvent {
     },
     /// Connection state change.
     StateChange(Http3State),
-    /// The outgoing QUIC datagram queue has space again after having been full,
-    /// so a sender that received backpressure can resume.
+    /// The outgoing QUIC datagram queue has space again after having been full.
     OutgoingDatagramSpaceAvailable,
     WebTransport(WebTransportEvent),
     ConnectUdp(ConnectUdpEvent),
