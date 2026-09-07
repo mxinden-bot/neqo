@@ -841,3 +841,63 @@ fn datagram_capsule_flow_control_error_and_resume() {
         "resume event not emitted after control-stream flow control reopened"
     );
 }
+
+/// A datagram whose payload fits the window but whose capsule and DATA frame
+/// framing does not must be refused, not accepted and then truncated and lost.
+///
+/// After the CONNECT request and one `BIG` datagram the window holds `SMALL`'s
+/// payload but not its framing; `SMALL` sits mid-gap so the boundary tolerates
+/// small changes in what the request consumed.
+#[test]
+fn datagram_capsule_at_flow_control_boundary_is_refused_not_lost() {
+    const WINDOW: u64 = 150;
+    const BIG: usize = 113;
+    const SMALL: usize = 4;
+
+    let (mut client, mut proxy, session_id, _proxy_session) =
+        establish_capsule_session(Some(WINDOW));
+
+    // Fill the window to the boundary, without draining so it stays closed.
+    assert_eq!(
+        client.connect_udp_send_datagram(session_id, &[0x2c; BIG], None, now()),
+        Ok(true)
+    );
+
+    assert_eq!(
+        client.connect_udp_send_datagram(session_id, &[0x2c; SMALL], None, now()),
+        Err(Error::FlowControlLimit),
+        "boundary datagram accepted instead of refused: the guard under-counts the framing"
+    );
+    assert!(
+        !client
+            .events()
+            .any(|e| matches!(e, Http3ClientEvent::OutgoingDatagramSpaceAvailable)),
+        "resume event fired while the window was still closed"
+    );
+
+    // Draining reopens the window past the armed watermark and fires the resume.
+    exchange_packets(&mut client, &mut proxy, false, None);
+    assert!(
+        client
+            .events()
+            .any(|e| matches!(e, Http3ClientEvent::OutgoingDatagramSpaceAvailable)),
+        "resume event not emitted after the window reopened"
+    );
+
+    // The refused datagram now goes through; both reach the proxy.
+    assert_eq!(
+        client.connect_udp_send_datagram(session_id, &[0x2c; SMALL], None, now()),
+        Ok(true)
+    );
+    exchange_packets(&mut client, &mut proxy, false, None);
+    let received = proxy
+        .events()
+        .filter(|e| {
+            matches!(
+                e,
+                Http3ServerEvent::ConnectUdp(ServerEvent::Datagram { .. })
+            )
+        })
+        .count();
+    assert_eq!(received, 2, "proxy did not receive both datagrams");
+}

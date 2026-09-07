@@ -20,6 +20,7 @@ use crate::{
         session::{DgramContextIdError, State},
     },
     frames::{FrameReader, StreamReaderRecvStreamWrapper, capsule::Capsule},
+    send_message::SendMessage,
 };
 
 #[derive(Debug)]
@@ -133,20 +134,23 @@ impl Protocol for Session {
         let mut dgram_data = Encoder::default();
         self.write_datagram_prefix(&mut dgram_data);
         dgram_data.encode(buf);
-
-        if conn.stream_avail_send_space(self.session_id)? < dgram_data.len() {
-            qdebug!("[{self}] datagram capsule exceeds control-stream flow-control space");
-            // Ask to be told when the stream can hold a capsule this size again.
-            if let Some(watermark) = NonZeroUsize::new(dgram_data.len()) {
-                conn.stream_set_writable_event_low_watermark(self.session_id, watermark)?;
-            }
-            return Err(Error::FlowControlLimit);
-        }
         // TODO: Make Capsule abstract over either an owned (Bytes) or borrowed (&[u8]) type
         // to avoid this allocation.
         let capsule = Capsule::Datagram {
             payload: Bytes::from(Vec::from(dgram_data)),
         };
+
+        // The capsule goes on the control stream wrapped in an HTTP/3 DATA frame, so the
+        // flow-control window has to hold both wrappers, not just the payload.
+        let needed = SendMessage::data_frame_len(capsule.encoded_len());
+        if conn.stream_avail_send_space(self.session_id)? < needed {
+            qdebug!("[{self}] datagram capsule exceeds control-stream flow-control space");
+            // Ask to be told when the stream can hold a capsule this size again.
+            if let Some(watermark) = NonZeroUsize::new(needed) {
+                conn.stream_set_writable_event_low_watermark(self.session_id, watermark)?;
+            }
+            return Err(Error::FlowControlLimit);
+        }
         let mut enc = Encoder::default();
         capsule.encode(&mut enc);
         control_stream_send.send_data_atomic(conn, enc.as_ref(), now)?;
