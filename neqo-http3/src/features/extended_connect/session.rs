@@ -404,23 +404,14 @@ impl Session {
         self.control_stream_send.send_data(conn, buf, now)
     }
 
-    /// # Returns
-    ///
-    /// `Ok(true)` if the datagram was queued and space remains, or `Ok(false)`
-    /// if it was queued but the outgoing QUIC datagram queue is now full and the
-    /// producer should stop sending until it receives an
-    /// [`OutgoingDatagramSpaceAvailable`] event (backpressure). Datagrams sent as
-    /// HTTP DATAGRAM Capsules report `Ok(true)` on success, or `FlowControlLimit`
-    /// if the control stream's flow-control window is exhausted; see
-    /// [`Protocol::write_datagram_capsule`].
-    ///
-    /// [`OutgoingDatagramSpaceAvailable`]: crate::Http3ClientEvent::OutgoingDatagramSpaceAvailable
+    /// Send a datagram, as a QUIC datagram or, when the peer offers no QUIC
+    /// datagram support, an HTTP DATAGRAM Capsule. Returns `Ok(false)` when the
+    /// outgoing QUIC datagram queue is full.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - The session is not in Active state (`Error::Unavailable`).
-    /// - QUIC datagram or HTTP DATAGRAM Capsule sending fails.
+    /// `Error::Unavailable` if the session is not Active; other errors if
+    /// sending the datagram or capsule fails.
     pub(crate) fn send_datagram<I: Into<DatagramTracking>>(
         &mut self,
         conn: &mut Connection,

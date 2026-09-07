@@ -259,7 +259,7 @@ impl Http3ServerConnEvents {
     /// `neqo-transport`'s [`ConnectionEvent::OutgoingDatagramSpaceAvailable`].
     ///
     /// [`ConnectionEvent::OutgoingDatagramSpaceAvailable`]: neqo_transport::ConnectionEvent::OutgoingDatagramSpaceAvailable
-    pub fn datagram_space_available(&self) {
+    pub(crate) fn datagram_space_available(&self) {
         self.events
             .push_unique(Http3ServerConnEvent::OutgoingDatagramSpaceAvailable);
     }
