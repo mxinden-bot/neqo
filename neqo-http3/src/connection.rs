@@ -1630,12 +1630,7 @@ impl Http3Connection {
         Ok(())
     }
 
-    /// Returns `Ok(true)` if the datagram was queued with room to spare, or
-    /// `Ok(false)` if it was queued but the queue is now full and the sender
-    /// should stop until an [`OutgoingDatagramSpaceAvailable`] event
-    /// (backpressure).
-    ///
-    /// [`OutgoingDatagramSpaceAvailable`]: crate::Http3ClientEvent::OutgoingDatagramSpaceAvailable
+    /// Returns `Ok(false)` when the outgoing QUIC datagram queue is full.
     pub(crate) fn extended_connect_send_datagram<I: Into<DatagramTracking>>(
         &self,
         session_id: StreamId,

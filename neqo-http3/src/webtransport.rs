@@ -186,9 +186,8 @@ pub trait ClientSession {
     ///
     /// # Returns
     ///
-    /// `Ok(true)` if the datagram was queued with room to spare, or `Ok(false)`
-    /// if it was queued but the queue is now full and the sender should stop
-    /// until an [`OutgoingDatagramSpaceAvailable`] event (backpressure).
+    /// `Ok(false)` when the outgoing QUIC datagram queue is full; the sender
+    /// should then wait for an [`OutgoingDatagramSpaceAvailable`] event.
     ///
     /// # Errors
     ///
@@ -422,12 +421,7 @@ trait Handler {
         now: Instant,
     ) -> Res<extended_connect::stats::SessionStats>;
 
-    /// Returns `Ok(true)` if the datagram was queued with room to spare, or
-    /// `Ok(false)` if it was queued but the queue is now full and the sender
-    /// should stop until an [`OutgoingDatagramSpaceAvailable`] event
-    /// (backpressure).
-    ///
-    /// [`OutgoingDatagramSpaceAvailable`]: crate::Http3ClientEvent::OutgoingDatagramSpaceAvailable
+    /// Returns `Ok(false)` when the outgoing QUIC datagram queue is full.
     fn webtransport_send_datagram<I: Into<DatagramTracking>>(
         &self,
         session_id: StreamId,
@@ -547,12 +541,7 @@ pub(crate) trait ServerHandler {
         stream_type: StreamType,
     ) -> Res<StreamId>;
 
-    /// Returns `Ok(true)` if the datagram was queued with room to spare, or
-    /// `Ok(false)` if it was queued but the queue is now full and the sender
-    /// should stop until an [`OutgoingDatagramSpaceAvailable`] event
-    /// (backpressure).
-    ///
-    /// [`OutgoingDatagramSpaceAvailable`]: crate::Http3ServerEvent::OutgoingDatagramSpaceAvailable
+    /// Returns `Ok(false)` when the outgoing QUIC datagram queue is full.
     fn webtransport_send_datagram<I: Into<DatagramTracking>>(
         &mut self,
         conn: &mut Connection,
@@ -729,9 +718,8 @@ impl ServerSession {
     ///
     /// # Returns
     ///
-    /// `Ok(true)` if the datagram was queued with room to spare, or `Ok(false)`
-    /// if it was queued but the queue is now full and the sender should stop
-    /// until an [`OutgoingDatagramSpaceAvailable`] event (backpressure).
+    /// `Ok(false)` when the outgoing QUIC datagram queue is full; the sender
+    /// should then wait for an [`OutgoingDatagramSpaceAvailable`] event.
     ///
     /// # Errors
     ///

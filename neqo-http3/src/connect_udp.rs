@@ -64,9 +64,8 @@ pub trait ClientSession {
     ///
     /// # Returns
     ///
-    /// `Ok(true)` if the datagram was queued with room to spare, or `Ok(false)`
-    /// if it was queued but the queue is now full and the sender should stop
-    /// until an [`OutgoingDatagramSpaceAvailable`] event (backpressure).
+    /// `Ok(false)` when the outgoing QUIC datagram queue is full; the sender
+    /// should then wait for an [`OutgoingDatagramSpaceAvailable`] event.
     ///
     /// # Errors
     ///
@@ -161,12 +160,7 @@ trait Handler {
         now: Instant,
     ) -> Res<()>;
 
-    /// Returns `Ok(true)` if the datagram was queued with room to spare, or
-    /// `Ok(false)` if it was queued but the queue is now full and the sender
-    /// should stop until an [`OutgoingDatagramSpaceAvailable`] event
-    /// (backpressure).
-    ///
-    /// [`OutgoingDatagramSpaceAvailable`]: crate::Http3ClientEvent::OutgoingDatagramSpaceAvailable
+    /// Returns `Ok(false)` when the outgoing QUIC datagram queue is full.
     fn connect_udp_send_datagram<I: Into<DatagramTracking>>(
         &self,
         conn: &mut Connection,
@@ -270,12 +264,7 @@ pub(crate) trait ServerHandler {
         now: Instant,
     ) -> Res<()>;
 
-    /// Returns `Ok(true)` if the datagram was queued with room to spare, or
-    /// `Ok(false)` if it was queued but the queue is now full and the sender
-    /// should stop until an [`OutgoingDatagramSpaceAvailable`] event
-    /// (backpressure).
-    ///
-    /// [`OutgoingDatagramSpaceAvailable`]: crate::Http3ServerEvent::OutgoingDatagramSpaceAvailable
+    /// Returns `Ok(false)` when the outgoing QUIC datagram queue is full.
     fn connect_udp_send_datagram<I: Into<DatagramTracking>>(
         &mut self,
         conn: &mut Connection,
