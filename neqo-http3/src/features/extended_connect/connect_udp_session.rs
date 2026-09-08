@@ -146,6 +146,8 @@ impl Protocol for Session {
         if conn.stream_avail_send_space(self.session_id)? < needed {
             qdebug!("[{self}] datagram capsule exceeds control-stream flow-control space");
             // Ask to be told when the stream can hold a capsule this size again.
+            // Repeated refusals overwrite this, so the event tracks the most recent
+            // size rather than the largest; the sender retries and re-arms.
             if let Some(watermark) = NonZeroUsize::new(needed) {
                 conn.stream_set_writable_event_low_watermark(self.session_id, watermark)?;
             }
