@@ -154,6 +154,9 @@ impl Protocol for Session {
         let mut enc = Encoder::default();
         capsule.encode(&mut enc);
         control_stream_send.send_data_atomic(conn, enc.as_ref(), now)?;
+        // Drop the watermark a previous refusal raised, so neqo-transport stops
+        // suppressing writable events for other users of the control stream.
+        conn.stream_set_writable_event_low_watermark(self.session_id, NonZeroUsize::MIN)?;
         qtrace!("[{self}] sent datagram via HTTP DATAGRAM Capsule");
         Ok(())
     }
