@@ -1190,7 +1190,7 @@ fn a_stale_datagram_does_not_backpressure_the_next_send() {
 /// datagram has been delivered to the peer.
 ///
 /// 0 is a legal `unsigned long` from script and nothing clamps it between
-/// the WebIDL attribute and `set_high_water_mark`.
+/// the `WebIDL` attribute and `set_high_water_mark`.
 #[test]
 fn a_zero_high_water_mark_still_resumes_the_sender() {
     let mut wt = WtTest::new();
@@ -1223,12 +1223,146 @@ fn a_zero_high_water_mark_still_resumes_the_sender() {
     assert_eq!(
         wt.client
             .events()
-            .filter(|e| matches!(
-                e,
-                Http3ClientEvent::OutgoingDatagramSpaceAvailable
-            ))
+            .filter(|e| matches!(e, Http3ClientEvent::OutgoingDatagramSpaceAvailable))
             .count(),
         1,
         "the sender was told to wait for a resume signal that never comes"
+    );
+}
+
+/// Scheduling and eviction disagree about fairness between send groups.
+///
+/// `take_next` round-robins across groups, so each gets an equal number of
+/// turns. `evict_lowest_priority` instead picks the globally lowest
+/// `(send_order, group_id)`, breaking ties by group ID, lowest first. At
+/// equal `send_order` that makes the lowest-numbered group the permanent
+/// sacrifice, and `SendGroupId::new(0)` is the sentinel for the null
+/// sendGroup, so datagrams the application never grouped are the first to
+/// go.
+///
+/// Under sustained overflow, which is what the byte budget exists for, the
+/// eviction bias overrides the scheduler's fairness: a group can be starved
+/// of the wire despite being served round-robin, because its datagrams are
+/// evicted before its turn comes round.
+#[test]
+fn eviction_does_not_defeat_round_robin_fairness() {
+    let mut wt = WtTest::new();
+    let wt_session = wt.create_wt_session();
+    let session_id = wt_session.stream_id();
+    let mut clock = now();
+    let group_b = wt
+        .client
+        .webtransport_create_send_group(session_id)
+        .unwrap();
+    let groups = [SendGroupId::new(0), group_b];
+
+    // Bursts far larger than the connection drains, so the byte budget is
+    // under constant pressure and eviction runs on nearly every send.
+    let mut next_id = 0_u64;
+    for _ in 0..8 {
+        for _ in 0..400 {
+            for (which, group) in groups.into_iter().enumerate() {
+                next_id += 1;
+                let mut payload = vec![0_u8; 900];
+                payload[0] = u8::try_from(which).expect("0 or 1");
+                // Same send_order for both: only the group ID differs.
+                drop(
+                    wt.client
+                        .webtransport_send_datagram(
+                            session_id,
+                            &payload,
+                            Some(next_id),
+                            clock,
+                            group,
+                            0,
+                        )
+                        .unwrap(),
+                );
+            }
+        }
+        clock += Duration::from_millis(5);
+        exchange_at(&mut wt, &mut clock);
+    }
+
+    let mut delivered = [0_usize, 0];
+    for e in wt.server.events() {
+        if let Http3ServerEvent::WebTransport(ServerEvent::Datagram { datagram, .. }) = e {
+            delivered[usize::from(datagram.as_ref()[0])] += 1;
+        }
+    }
+
+    let total = delivered[0] + delivered[1];
+    assert!(total > 0, "nothing was delivered");
+    assert!(
+        delivered[0] * 4 >= total,
+        "the null send group got {}/{total} of the wire: eviction by lowest group ID \
+         starves it despite round-robin scheduling",
+        delivered[0]
+    );
+}
+
+/// The same bias, between two groups the application created itself, to show
+/// it is not specific to the null sendGroup sentinel.
+///
+/// `send_group::Generator` mints IDs from 1 upwards and never reuses one, so
+/// "lowest group ID loses" means the group an application created first is
+/// permanently outranked by every group it creates later, at equal
+/// `send_order`. An application that mints a group per frame would starve
+/// its oldest groups by construction.
+#[test]
+fn eviction_is_fair_between_two_created_groups() {
+    let mut wt = WtTest::new();
+    let wt_session = wt.create_wt_session();
+    let session_id = wt_session.stream_id();
+    let mut clock = now();
+    let first = wt
+        .client
+        .webtransport_create_send_group(session_id)
+        .unwrap();
+    let second = wt
+        .client
+        .webtransport_create_send_group(session_id)
+        .unwrap();
+    assert!(first < second, "IDs are minted in increasing order");
+
+    let mut next_id = 0_u64;
+    for _ in 0..8 {
+        for _ in 0..400 {
+            for (which, group) in [first, second].into_iter().enumerate() {
+                next_id += 1;
+                let mut payload = vec![0_u8; 900];
+                payload[0] = u8::try_from(which).expect("0 or 1");
+                drop(
+                    wt.client
+                        .webtransport_send_datagram(
+                            session_id,
+                            &payload,
+                            Some(next_id),
+                            clock,
+                            group,
+                            0,
+                        )
+                        .unwrap(),
+                );
+            }
+        }
+        clock += Duration::from_millis(5);
+        exchange_at(&mut wt, &mut clock);
+    }
+
+    let mut delivered = [0_usize, 0];
+    for e in wt.server.events() {
+        if let Http3ServerEvent::WebTransport(ServerEvent::Datagram { datagram, .. }) = e {
+            delivered[usize::from(datagram.as_ref()[0])] += 1;
+        }
+    }
+
+    let total = delivered[0] + delivered[1];
+    assert!(total > 0, "nothing was delivered");
+    assert!(
+        delivered[0] * 4 >= total,
+        "the first-created group got {}/{total} of the wire: at equal send_order, \
+         eviction always takes the lower group ID",
+        delivered[0]
     );
 }
