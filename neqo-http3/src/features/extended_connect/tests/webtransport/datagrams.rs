@@ -1181,3 +1181,54 @@ fn a_stale_datagram_does_not_backpressure_the_next_send() {
          rather than counted against the high water mark"
     );
 }
+
+/// The contract every non-`Ok` outcome arms is "wait for
+/// `OutgoingDatagramSpaceAvailable`". With
+/// `outgoingMaxBufferedDatagrams` set to 0 it never arrives:
+/// `below_watermark` is `total_count < mark`, false at every count, so
+/// `resume_if_unblocked` cannot fire even once the queue is empty and the
+/// datagram has been delivered to the peer.
+///
+/// 0 is a legal `unsigned long` from script and nothing clamps it between
+/// the WebIDL attribute and `set_high_water_mark`.
+#[test]
+fn a_zero_high_water_mark_still_resumes_the_sender() {
+    let mut wt = WtTest::new();
+    let wt_session = wt.create_wt_session();
+    let session_id = wt_session.stream_id();
+    let mut clock = now();
+
+    wt.client
+        .webtransport_set_datagram_high_water_mark(session_id, Some(0))
+        .unwrap();
+
+    assert_eq!(
+        wt.client
+            .webtransport_send_datagram(session_id, DGRAM, Some(1), clock, SendGroupId::new(0), 0)
+            .unwrap(),
+        DatagramQueueOutcome::AboveWatermark,
+        "a mark of 0 puts the sender into backpressure immediately"
+    );
+
+    // Drain it all the way to the peer, then give expiry a long time too.
+    exchange_at(&mut wt, &mut clock);
+    clock += Duration::from_secs(2);
+    exchange_at(&mut wt, &mut clock);
+
+    assert_eq!(
+        wt_session.datagram_queue_capacity().queued_datagrams,
+        0,
+        "precondition: the queue is empty"
+    );
+    assert_eq!(
+        wt.client
+            .events()
+            .filter(|e| matches!(
+                e,
+                Http3ClientEvent::OutgoingDatagramSpaceAvailable
+            ))
+            .count(),
+        1,
+        "the sender was told to wait for a resume signal that never comes"
+    );
+}
