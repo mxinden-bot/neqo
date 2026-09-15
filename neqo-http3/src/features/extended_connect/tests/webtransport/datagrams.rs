@@ -700,3 +700,484 @@ fn client_set_datagram_high_water_mark_signals_backpressure() {
         "the second datagram crosses the high water mark"
     );
 }
+
+// ── Review: conservation of outgoing datagrams ─────────────────────────────
+
+/// Deterministic xorshift, so a failure is reproducible from its seed.
+struct Rng(u64);
+
+impl Rng {
+    const fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    const fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// Pump both ends until quiet, carrying a monotonic clock so max-age expiry
+/// actually fires. `WtTest::exchange_packets` restarts from `now()` on every
+/// call, which freezes time and hides anything age-related.
+fn exchange_at(wt: &mut WtTest, clock: &mut std::time::Instant) {
+    const RTT: Duration = Duration::from_millis(10);
+    let mut out = None;
+    for _ in 0..100 {
+        *clock += RTT / 2;
+        out = wt.client.process(out, *clock).dgram();
+        let client_quiet = out.is_none();
+        *clock += RTT / 2;
+        out = wt.server.process(out, *clock).dgram();
+        if client_quiet && out.is_none() {
+            return;
+        }
+    }
+    panic!("exchange did not settle");
+}
+
+/// Every datagram the queue accepts must end up in exactly one of the three
+/// per-session counters: sent, expired, or dropped. Nothing may vanish, and
+/// nothing may be counted twice.
+///
+/// Randomised over sizes, send groups, send orders and inter-burst delays, so
+/// it exercises eviction, rejection and max-age expiry together rather than
+/// one at a time.
+#[test]
+fn outgoing_datagram_accounting_is_conserved() {
+    for seed in 1..8_u64 {
+        let mut rng = Rng(seed);
+        let mut wt = WtTest::new();
+        let wt_session = wt.create_wt_session();
+        let session_id = wt_session.stream_id();
+        let mut clock = now();
+        let mut accepted = 0_u64;
+        let mut next_id = 0_u64;
+        let groups: Vec<SendGroupId> = std::iter::once(SendGroupId::new(0))
+            .chain(std::iter::repeat_with(|| {
+                wt.client
+                    .webtransport_create_send_group(session_id)
+                    .expect("create send group")
+            }))
+            .take(3)
+            .collect();
+
+        for _ in 0..12 {
+            for _ in 0..25 {
+                next_id += 1;
+                let len = 1 + usize::try_from(rng.below(900)).expect("small");
+                let outcome = wt
+                    .client
+                    .webtransport_send_datagram(
+                        session_id,
+                        &vec![7; len],
+                        Some(next_id),
+                        clock,
+                        groups[usize::try_from(rng.below(3)).expect("small")],
+                        i64::try_from(rng.below(3)).expect("small"),
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!("seed {seed}: send_datagram failed with {e:?} (len={len})")
+                    });
+                drop(outcome);
+                accepted += 1;
+            }
+            // Change outgoingMaxAge mid-flight, which expires queued
+            // datagrams synchronously and must still count them.
+            if rng.below(3) == 0 {
+                wt.client
+                    .webtransport_set_datagram_max_age(
+                        session_id,
+                        Some(Duration::from_millis(1 + rng.below(80))),
+                        clock,
+                    )
+                    .unwrap();
+            }
+            clock += Duration::from_millis(rng.below(60));
+            exchange_at(&mut wt, &mut clock);
+        }
+
+        // Let anything still queued expire or drain.
+        clock += Duration::from_secs(2);
+        exchange_at(&mut wt, &mut clock);
+
+        let received = wt
+            .server
+            .events()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Http3ServerEvent::WebTransport(ServerEvent::Datagram { .. })
+                )
+            })
+            .count();
+
+        let stats = wt.client.webtransport_session_stats(session_id).unwrap();
+        assert_eq!(
+            stats.datagrams_sent_outgoing
+                + stats.datagrams_expired_outgoing
+                + stats.datagrams_dropped_outgoing,
+            accepted,
+            "seed {seed}: datagrams went missing. sent={} expired={} dropped={} accepted={accepted}",
+            stats.datagrams_sent_outgoing,
+            stats.datagrams_expired_outgoing,
+            stats.datagrams_dropped_outgoing,
+        );
+        assert_eq!(
+            to_u64(received),
+            stats.datagrams_sent_outgoing,
+            "seed {seed}: the peer did not receive every datagram counted as sent"
+        );
+        assert_eq!(
+            wt_session.datagram_queue_capacity().queued_datagrams,
+            0,
+            "seed {seed}: datagrams left queued after everything settled"
+        );
+    }
+}
+
+/// Two sessions on one connection, hammered concurrently. Each session's
+/// three counters must add up to what that session accepted, with no
+/// cross-session leakage: a connection-wide expiry sweep that handed
+/// whichever session swept first every other session's expired IDs would
+/// show up here as one session over-counting and the other under-counting.
+#[test]
+fn per_session_datagram_accounting_does_not_leak_across_sessions() {
+    for seed in 1..6_u64 {
+        let mut rng = Rng(seed);
+        let mut wt = WtTest::new();
+        let session_a = wt.create_wt_session().stream_id();
+        let session_b = wt.create_second_wt_session();
+        let mut clock = now();
+        let mut accepted = [0_u64, 0];
+        let mut next_id = 0_u64;
+
+        for _ in 0..10 {
+            for _ in 0..20 {
+                next_id += 1;
+                let which = usize::try_from(rng.below(2)).expect("small");
+                let session = if which == 0 { session_a } else { session_b };
+                let len = 1 + usize::try_from(rng.below(900)).expect("small");
+                wt.client
+                    .webtransport_send_datagram(
+                        session,
+                        &vec![7; len],
+                        Some(next_id),
+                        clock,
+                        SendGroupId::new(0),
+                        i64::try_from(rng.below(3)).expect("small"),
+                    )
+                    .unwrap_or_else(|e| panic!("seed {seed}: send_datagram failed with {e:?}"));
+                accepted[which] += 1;
+            }
+            clock += Duration::from_millis(rng.below(60));
+            exchange_at(&mut wt, &mut clock);
+        }
+
+        clock += Duration::from_secs(2);
+        exchange_at(&mut wt, &mut clock);
+
+        for (which, session) in [session_a, session_b].into_iter().enumerate() {
+            let stats = wt.client.webtransport_session_stats(session).unwrap();
+            assert_eq!(
+                stats.datagrams_sent_outgoing
+                    + stats.datagrams_expired_outgoing
+                    + stats.datagrams_dropped_outgoing,
+                accepted[which],
+                "seed {seed}: session {which} accounting drifted. sent={} expired={} dropped={} accepted={}",
+                stats.datagrams_sent_outgoing,
+                stats.datagrams_expired_outgoing,
+                stats.datagrams_dropped_outgoing,
+                accepted[which],
+            );
+        }
+    }
+}
+
+/// `DatagramQueueOutcome::Rejected` promises "Nothing else was disturbed":
+/// the incoming datagram is refused outright rather than evicting something
+/// that outranks it. Check that literally, through the public API.
+#[test]
+fn a_rejected_datagram_disturbs_nothing() {
+    let mut wt = WtTest::new();
+    let wt_session = wt.create_wt_session();
+    let session_id = wt_session.stream_id();
+    let t0 = now();
+
+    // Fill the byte budget with high-priority datagrams.
+    let mut queued = 0_u64;
+    loop {
+        queued += 1;
+        let outcome = wt
+            .client
+            .webtransport_send_datagram(
+                session_id,
+                &[9; 512],
+                Some(queued),
+                t0,
+                SendGroupId::new(0),
+                10,
+            )
+            .unwrap();
+        if !matches!(outcome, DatagramQueueOutcome::Ok) {
+            break;
+        }
+        assert!(queued < 1_000_000, "byte budget should have been hit");
+    }
+    let before = wt_session.datagram_queue_capacity();
+
+    // A lower-priority newcomer must be refused, leaving the queue untouched.
+    assert_eq!(
+        wt.client
+            .webtransport_send_datagram(
+                session_id,
+                &[1; 512],
+                Some(u64::MAX),
+                t0,
+                SendGroupId::new(0),
+                0,
+            )
+            .unwrap(),
+        DatagramQueueOutcome::Rejected
+    );
+    assert_eq!(
+        wt_session.datagram_queue_capacity(),
+        before,
+        "a rejected datagram must leave the queue exactly as it was"
+    );
+}
+
+/// Backpressure must always lift. Model an application that follows the
+/// contract literally: it sends until `send_datagram` reports anything but
+/// `Ok`, then stops until it sees `OutgoingDatagramSpaceAvailable`.
+///
+/// The failure this is looking for is a lost resume signal: once the queue
+/// has drained, a sender still waiting has stalled for good, because nothing
+/// else will ever revisit that queue on its behalf.
+#[test]
+fn a_backpressured_sender_is_always_resumed() {
+    for seed in 1..10_u64 {
+        let mut rng = Rng(seed);
+        let mut wt = WtTest::new();
+        let wt_session = wt.create_wt_session();
+        let session_id = wt_session.stream_id();
+        let mut clock = now();
+        let mut next_id = 0_u64;
+        let mut blocked = false;
+
+        // A mark low enough that backpressure is reached constantly.
+        wt.client
+            .webtransport_set_datagram_high_water_mark(session_id, Some(2))
+            .unwrap();
+
+        for round in 0..40 {
+            if !blocked {
+                for _ in 0..=rng.below(4) {
+                    next_id += 1;
+                    let outcome = wt
+                        .client
+                        .webtransport_send_datagram(
+                            session_id,
+                            &[3; 64],
+                            Some(next_id),
+                            clock,
+                            SendGroupId::new(0),
+                            0,
+                        )
+                        .unwrap();
+                    if outcome != DatagramQueueOutcome::Ok {
+                        blocked = true;
+                        break;
+                    }
+                }
+            }
+
+            clock += Duration::from_millis(rng.below(40));
+            exchange_at(&mut wt, &mut clock);
+
+            if wt
+                .client
+                .events()
+                .any(|e| matches!(e, Http3ClientEvent::OutgoingDatagramSpaceAvailable))
+            {
+                blocked = false;
+            }
+
+            assert!(
+                !(blocked && wt_session.datagram_queue_capacity().queued_datagrams == 0),
+                "seed {seed} round {round}: sender still blocked with an empty queue, \
+                 so the resume signal was lost"
+            );
+        }
+    }
+}
+
+/// Same liveness model, but the application also changes
+/// `outgoingMaxBufferedDatagrams` while it is running, which is what the
+/// `WebIDL` attribute lets it do at any time.
+///
+/// This is the end-to-end face of the missing `resume_if_unblocked` in
+/// `QuicDatagrams::set_datagram_high_water_mark`.
+#[test]
+fn a_backpressured_sender_is_resumed_when_the_mark_is_raised() {
+    for seed in 1..10_u64 {
+        let mut rng = Rng(seed);
+        let mut wt = WtTest::new();
+        let wt_session = wt.create_wt_session();
+        let session_id = wt_session.stream_id();
+        let mut clock = now();
+        let mut next_id = 0_u64;
+        let mut blocked = false;
+
+        wt.client
+            .webtransport_set_datagram_high_water_mark(session_id, Some(2))
+            .unwrap();
+
+        for round in 0..40 {
+            if !blocked {
+                for _ in 0..=rng.below(4) {
+                    next_id += 1;
+                    let outcome = wt
+                        .client
+                        .webtransport_send_datagram(
+                            session_id,
+                            &[3; 64],
+                            Some(next_id),
+                            clock,
+                            SendGroupId::new(0),
+                            0,
+                        )
+                        .unwrap();
+                    if outcome != DatagramQueueOutcome::Ok {
+                        blocked = true;
+                        break;
+                    }
+                }
+            }
+
+            if rng.below(3) == 0 {
+                wt.client
+                    .webtransport_set_datagram_high_water_mark(
+                        session_id,
+                        Some(1 + usize::try_from(rng.below(20)).expect("small")),
+                    )
+                    .unwrap();
+            }
+
+            clock += Duration::from_millis(rng.below(40));
+            exchange_at(&mut wt, &mut clock);
+
+            if wt
+                .client
+                .events()
+                .any(|e| matches!(e, Http3ClientEvent::OutgoingDatagramSpaceAvailable))
+            {
+                blocked = false;
+            }
+
+            assert!(
+                !(blocked && wt_session.datagram_queue_capacity().queued_datagrams == 0),
+                "seed {seed} round {round}: sender still blocked with an empty queue, \
+                 so the resume signal was lost"
+            );
+        }
+    }
+}
+
+/// The same conservation law, driven from the server, whose processing is
+/// gated by `Http3ServerHandler::should_be_processed`. A connection whose
+/// only pending work is a datagram expiry has to be selected for a tick, or
+/// nothing runs the per-session sweep that counts the outcome, and the
+/// counters silently under-report.
+#[test]
+fn server_side_outgoing_datagram_accounting_is_conserved() {
+    for seed in 1..6_u64 {
+        let mut rng = Rng(seed);
+        let mut wt = WtTest::new();
+        let wt_session = wt.create_wt_session();
+        let mut clock = now();
+        let mut accepted = 0_u64;
+        let mut next_id = 0_u64;
+
+        for _ in 0..12 {
+            for _ in 0..20 {
+                next_id += 1;
+                let len = 1 + usize::try_from(rng.below(900)).expect("small");
+                wt_session
+                    .send_datagram(
+                        &vec![5; len],
+                        Some(next_id),
+                        clock,
+                        SendGroupId::new(0),
+                        i64::try_from(rng.below(3)).expect("small"),
+                    )
+                    .unwrap_or_else(|e| panic!("seed {seed}: send_datagram failed with {e:?}"));
+                accepted += 1;
+            }
+            clock += Duration::from_millis(rng.below(60));
+            exchange_at(&mut wt, &mut clock);
+        }
+
+        clock += Duration::from_secs(2);
+        exchange_at(&mut wt, &mut clock);
+
+        let stats = wt_session.stats();
+        assert_eq!(
+            stats.datagrams_sent_outgoing
+                + stats.datagrams_expired_outgoing
+                + stats.datagrams_dropped_outgoing,
+            accepted,
+            "seed {seed}: sent={} expired={} dropped={} accepted={accepted}",
+            stats.datagrams_sent_outgoing,
+            stats.datagrams_expired_outgoing,
+            stats.datagrams_dropped_outgoing,
+        );
+        assert_eq!(
+            wt_session.datagram_queue_capacity().queued_datagrams,
+            0,
+            "seed {seed}: datagrams left queued after everything settled"
+        );
+    }
+}
+
+/// End-to-end face of the missing expire-before-enqueue: an application that
+/// sends twice between two ticks is told to back off because of a datagram
+/// that is already past `outgoingMaxAge` and should have been shed.
+///
+/// `Session::send_datagram` goes straight to `Connection::enqueue_datagram`,
+/// and the per-tick sweep only runs inside `process_http3`, so a burst of
+/// sends in one task sees a queue that nothing has swept.
+#[test]
+fn a_stale_datagram_does_not_backpressure_the_next_send() {
+    let mut wt = WtTest::new();
+    let wt_session = wt.create_wt_session();
+    let session_id = wt_session.stream_id();
+    let t0 = now();
+
+    wt.client
+        .webtransport_set_datagram_max_age(session_id, Some(Duration::from_millis(5)), t0)
+        .unwrap();
+    wt.client
+        .webtransport_set_datagram_high_water_mark(session_id, Some(1))
+        .unwrap();
+
+    assert_eq!(
+        wt.client
+            .webtransport_send_datagram(session_id, DGRAM, Some(1), t0, SendGroupId::new(0), 0)
+            .unwrap(),
+        DatagramQueueOutcome::AboveWatermark
+    );
+
+    // No tick in between: the application just sends again, later.
+    let t1 = t0 + Duration::from_millis(50);
+    assert_eq!(
+        wt.client
+            .webtransport_send_datagram(session_id, DGRAM, Some(2), t1, SendGroupId::new(0), 0)
+            .unwrap(),
+        DatagramQueueOutcome::Ok,
+        "datagram 1 is ten times past its max age; it must be shed as expired \
+         rather than counted against the high water mark"
+    );
+}

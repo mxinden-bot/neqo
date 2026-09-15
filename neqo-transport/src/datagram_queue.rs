@@ -2098,7 +2098,7 @@ mod review_bugs {
     /// BUG 1: a high water mark of zero blocks the sender permanently.
     ///
     /// `outgoingMaxBufferedDatagrams` is an `unsigned long`, so 0 is a legal
-    /// value from script, and nothing between the WebIDL attribute and
+    /// value from script, and nothing between the `WebIDL` attribute and
     /// `set_high_water_mark` clamps it. `below_watermark` is
     /// `total_count < mark`, which is false at every count when `mark == 0`,
     /// so `resume_if_unblocked` can never fire and the application waits for
@@ -2173,5 +2173,130 @@ mod review_bugs {
             DatagramQueueOutcome::Ok,
             "a stale datagram must not exert backpressure"
         );
+    }
+}
+
+#[cfg(test)]
+mod invariants {
+    use test_fixture::now;
+
+    use super::*;
+
+    /// Deterministic xorshift, so a failure is reproducible from its seed.
+    struct Rng(u64);
+
+    impl Rng {
+        const fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        const fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// Walk the queue's own structure and compare it against the running
+    /// totals that every public method maintains incrementally.
+    fn check(q: &DatagramQueue, seed: u64, step: usize) {
+        let mut count = 0;
+        let mut bytes = 0;
+        for (gid, group) in &q.groups {
+            let mut group_count = 0;
+            for bucket in group.by_order.values() {
+                assert!(
+                    !bucket.is_empty(),
+                    "seed {seed} step {step}: empty send_order bucket left in group {gid:?}"
+                );
+                group_count += bucket.len();
+                for d in bucket {
+                    bytes += charge(d.data.len());
+                }
+            }
+            assert_eq!(
+                group.count, group_count,
+                "seed {seed} step {step}: group {gid:?} count drifted"
+            );
+            assert!(
+                !group.is_empty(),
+                "seed {seed} step {step}: empty group {gid:?} left in the map"
+            );
+            count += group_count;
+        }
+        assert_eq!(
+            q.total_count, count,
+            "seed {seed} step {step}: total_count drifted"
+        );
+        assert_eq!(
+            q.total_bytes, bytes,
+            "seed {seed} step {step}: total_bytes drifted"
+        );
+    }
+
+    /// Hammer every public operation in random order and check the queue's
+    /// internal accounting after each one.
+    #[test]
+    fn accounting_survives_random_operations() {
+        let t0 = now();
+        for seed in 1..200_u64 {
+            let mut rng = Rng(seed);
+            let mut q = DatagramQueue::new();
+            q.max_queued_bytes = 1 + usize::try_from(rng.below(6)).expect("small") * charge(4);
+            let default_max_age = Duration::from_millis(1 + rng.below(50));
+            let mut clock = t0;
+            let mut next_id = 0;
+
+            for step in 0..200 {
+                match rng.below(10) {
+                    0..=4 => {
+                        next_id += 1;
+                        let len = usize::try_from(rng.below(8)).expect("small");
+                        q.enqueue(
+                            vec![7; len],
+                            Some(next_id),
+                            clock,
+                            SendGroupId::new(rng.below(3)),
+                            i64::try_from(rng.below(3)).expect("small"),
+                        );
+                    }
+                    5 => {
+                        let peeked = q.peek_next_len();
+                        let taken = q.take_next().map(|d| d.data.len());
+                        assert_eq!(
+                            peeked, taken,
+                            "seed {seed} step {step}: peek and take disagreed"
+                        );
+                    }
+                    6 => {
+                        q.expire(clock, default_max_age);
+                        assert!(
+                            q.next_expiry(default_max_age).is_none_or(|e| e > clock),
+                            "seed {seed} step {step}: expiry left something already due, \
+                             which trips `Connection::next_delay`'s `earliest > now` assert"
+                        );
+                    }
+                    7 => q.set_high_water_mark(Some(usize::try_from(rng.below(4)).expect("small"))),
+                    8 => {
+                        let age =
+                            (rng.below(2) == 0).then(|| Duration::from_millis(1 + rng.below(50)));
+                        q.set_max_age(age, clock, default_max_age);
+                    }
+                    _ => clock += Duration::from_millis(rng.below(30)),
+                }
+                check(&q, seed, step);
+                _ = q.resume_if_unblocked();
+            }
+
+            let drained = q.take_all();
+            assert!(
+                q.is_empty(),
+                "seed {seed}: take_all left the queue non-empty"
+            );
+            assert_eq!(q.total_bytes, 0, "seed {seed}: take_all left bytes behind");
+            check(&q, seed, usize::MAX);
+            drop(drained);
+        }
     }
 }
