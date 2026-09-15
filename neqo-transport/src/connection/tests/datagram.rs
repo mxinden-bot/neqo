@@ -1193,3 +1193,37 @@ fn resume_signal_fires_once_a_blocked_queue_drains_below_watermark() {
         "draining a blocked queue back below its watermark must fire a resume signal"
     );
 }
+
+// ── Review findings ────────────────────────────────────────────────────────
+
+/// BUG 3: raising a session's high water mark does not resume a sender that
+/// the old, lower mark had blocked.
+///
+/// `QuicDatagrams::set_datagram_max_age` calls `resume_if_unblocked` for
+/// exactly this reason ("nothing else will revisit it"), but
+/// `set_datagram_high_water_mark` does not, so an application that raises
+/// `outgoingMaxBufferedDatagrams` while blocked keeps waiting until a send or
+/// an expiry happens to revisit the queue.
+#[test]
+fn raising_the_high_water_mark_resumes_a_blocked_sender() {
+    let (mut client, _server) = connect_datagram();
+    let now = now();
+    let session = StreamId::new(0);
+
+    client.set_datagram_high_water_mark(session, Some(1));
+    // One queued datagram is already at the mark, so the sender is told to wait.
+    assert_eq!(
+        client.enqueue_datagram(session, vec![1], Some(1), now, SendGroupId::new(0), 0),
+        DatagramQueueOutcome::AboveWatermark
+    );
+    _ = client.events().count();
+
+    client.set_datagram_high_water_mark(session, Some(100));
+
+    assert!(
+        client
+            .events()
+            .any(|e| matches!(e, ConnectionEvent::OutgoingDatagramSpaceAvailable)),
+        "raising the mark above the queued count must resume the sender"
+    );
+}

@@ -2084,3 +2084,94 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod review_bugs {
+    use test_fixture::now;
+
+    use super::*;
+
+    const fn g(id: u64) -> SendGroupId {
+        SendGroupId::new(id)
+    }
+
+    /// BUG 1: a high water mark of zero blocks the sender permanently.
+    ///
+    /// `outgoingMaxBufferedDatagrams` is an `unsigned long`, so 0 is a legal
+    /// value from script, and nothing between the WebIDL attribute and
+    /// `set_high_water_mark` clamps it. `below_watermark` is
+    /// `total_count < mark`, which is false at every count when `mark == 0`,
+    /// so `resume_if_unblocked` can never fire and the application waits for
+    /// a resume signal that will never come.
+    #[test]
+    fn hwm_zero_resumes_once_drained() {
+        let mut q = DatagramQueue::new();
+        let t = now();
+        q.set_high_water_mark(Some(0));
+
+        assert_eq!(
+            q.enqueue(vec![1], Some(1), t, g(0), 0),
+            DatagramQueueOutcome::AboveWatermark
+        );
+        assert!(q.take_next().is_some());
+        assert!(q.is_empty(), "queue drained");
+        assert!(
+            q.resume_if_unblocked(),
+            "an empty queue must resume a blocked sender"
+        );
+    }
+
+    /// BUG 2: `enqueue` evicts for the byte budget without expiring first, so
+    /// a datagram that is already past its max age is reported `Dropped`
+    /// rather than `Expired`, and the application sees backpressure whose
+    /// real cause was age, not depth.
+    ///
+    /// This is the regression that commit 90ab2a6 ("Expire stale datagrams
+    /// before enqueueing, not after") fixed in the previous stack.
+    #[test]
+    fn stale_datagram_is_expired_not_evicted() {
+        let mut q = DatagramQueue::new();
+        q.max_queued_bytes = charge(1); // room for exactly one 1-byte datagram
+        let t0 = now();
+        let max_age = Duration::from_millis(50);
+        q.set_max_age(Some(max_age), t0, DEFAULT_MAX_AGE_FLOOR);
+
+        assert_eq!(
+            q.enqueue(vec![1], Some(1), t0, g(0), 0),
+            DatagramQueueOutcome::Ok
+        );
+
+        // Datagram 1 is past its max age: it should be shed as expired, and
+        // the newcomer should find an empty queue.
+        let t1 = t0 + max_age * 2;
+        assert_eq!(
+            q.enqueue(vec![2], Some(2), t1, g(0), 0),
+            DatagramQueueOutcome::Ok,
+            "a stale datagram must not count against the byte budget"
+        );
+    }
+
+    /// BUG 2, second face: the same omission on the high-water-mark path,
+    /// which needs no byte-budget setup. A queue of nothing but stale
+    /// datagrams still reports `AboveWatermark`.
+    #[test]
+    fn stale_datagrams_do_not_count_against_the_watermark() {
+        let mut q = DatagramQueue::new();
+        let t0 = now();
+        let max_age = Duration::from_millis(50);
+        q.set_max_age(Some(max_age), t0, DEFAULT_MAX_AGE_FLOOR);
+        q.set_high_water_mark(Some(1));
+
+        assert_eq!(
+            q.enqueue(vec![1], Some(1), t0, g(0), 0),
+            DatagramQueueOutcome::Ok
+        );
+
+        let t1 = t0 + max_age * 2;
+        assert_eq!(
+            q.enqueue(vec![2], Some(2), t1, g(0), 0),
+            DatagramQueueOutcome::Ok,
+            "a stale datagram must not exert backpressure"
+        );
+    }
+}
