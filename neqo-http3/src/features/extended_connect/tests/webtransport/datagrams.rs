@@ -860,7 +860,8 @@ fn per_session_datagram_accounting_does_not_leak_across_sessions() {
                 let which = usize::try_from(rng.below(2)).expect("small");
                 let session = if which == 0 { session_a } else { session_b };
                 let len = 1 + usize::try_from(rng.below(900)).expect("small");
-                wt.client
+                _ = wt
+                    .client
                     .webtransport_send_datagram(
                         session,
                         &vec![7; len],
@@ -969,7 +970,7 @@ fn a_backpressured_sender_is_always_resumed() {
 
         // A mark low enough that backpressure is reached constantly.
         wt.client
-            .webtransport_set_datagram_high_water_mark(session_id, Some(2))
+            .webtransport_set_datagram_high_water_mark(session_id, NonZeroUsize::new(2))
             .unwrap();
 
         for round in 0..40 {
@@ -1032,7 +1033,7 @@ fn a_backpressured_sender_is_resumed_when_the_mark_is_raised() {
         let mut blocked = false;
 
         wt.client
-            .webtransport_set_datagram_high_water_mark(session_id, Some(2))
+            .webtransport_set_datagram_high_water_mark(session_id, NonZeroUsize::new(2))
             .unwrap();
 
         for round in 0..40 {
@@ -1061,7 +1062,7 @@ fn a_backpressured_sender_is_resumed_when_the_mark_is_raised() {
                 wt.client
                     .webtransport_set_datagram_high_water_mark(
                         session_id,
-                        Some(1 + usize::try_from(rng.below(20)).expect("small")),
+                        NonZeroUsize::new(1 + usize::try_from(rng.below(20)).expect("small")),
                     )
                     .unwrap();
             }
@@ -1105,7 +1106,7 @@ fn server_side_outgoing_datagram_accounting_is_conserved() {
             for _ in 0..20 {
                 next_id += 1;
                 let len = 1 + usize::try_from(rng.below(900)).expect("small");
-                wt_session
+                _ = wt_session
                     .send_datagram(
                         &vec![5; len],
                         Some(next_id),
@@ -1160,7 +1161,7 @@ fn a_stale_datagram_does_not_backpressure_the_next_send() {
         .webtransport_set_datagram_max_age(session_id, Some(Duration::from_millis(5)), t0)
         .unwrap();
     wt.client
-        .webtransport_set_datagram_high_water_mark(session_id, Some(1))
+        .webtransport_set_datagram_high_water_mark(session_id, NonZeroUsize::new(1))
         .unwrap();
 
     assert_eq!(
@@ -1179,54 +1180,6 @@ fn a_stale_datagram_does_not_backpressure_the_next_send() {
         DatagramQueueOutcome::Ok,
         "datagram 1 is ten times past its max age; it must be shed as expired \
          rather than counted against the high water mark"
-    );
-}
-
-/// The contract every non-`Ok` outcome arms is "wait for
-/// `OutgoingDatagramSpaceAvailable`". With
-/// `outgoingMaxBufferedDatagrams` set to 0 it never arrives:
-/// `below_watermark` is `total_count < mark`, false at every count, so
-/// `resume_if_unblocked` cannot fire even once the queue is empty and the
-/// datagram has been delivered to the peer.
-///
-/// 0 is a legal `unsigned long` from script and nothing clamps it between
-/// the `WebIDL` attribute and `set_high_water_mark`.
-#[test]
-fn a_zero_high_water_mark_still_resumes_the_sender() {
-    let mut wt = WtTest::new();
-    let wt_session = wt.create_wt_session();
-    let session_id = wt_session.stream_id();
-    let mut clock = now();
-
-    wt.client
-        .webtransport_set_datagram_high_water_mark(session_id, Some(0))
-        .unwrap();
-
-    assert_eq!(
-        wt.client
-            .webtransport_send_datagram(session_id, DGRAM, Some(1), clock, SendGroupId::new(0), 0)
-            .unwrap(),
-        DatagramQueueOutcome::AboveWatermark,
-        "a mark of 0 puts the sender into backpressure immediately"
-    );
-
-    // Drain it all the way to the peer, then give expiry a long time too.
-    exchange_at(&mut wt, &mut clock);
-    clock += Duration::from_secs(2);
-    exchange_at(&mut wt, &mut clock);
-
-    assert_eq!(
-        wt_session.datagram_queue_capacity().queued_datagrams,
-        0,
-        "precondition: the queue is empty"
-    );
-    assert_eq!(
-        wt.client
-            .events()
-            .filter(|e| matches!(e, Http3ClientEvent::OutgoingDatagramSpaceAvailable))
-            .count(),
-        1,
-        "the sender was told to wait for a resume signal that never comes"
     );
 }
 
@@ -1266,18 +1219,17 @@ fn eviction_does_not_defeat_round_robin_fairness() {
                 let mut payload = vec![0_u8; 900];
                 payload[0] = u8::try_from(which).expect("0 or 1");
                 // Same send_order for both: only the group ID differs.
-                drop(
-                    wt.client
-                        .webtransport_send_datagram(
-                            session_id,
-                            &payload,
-                            Some(next_id),
-                            clock,
-                            group,
-                            0,
-                        )
-                        .unwrap(),
-                );
+                _ = wt
+                    .client
+                    .webtransport_send_datagram(
+                        session_id,
+                        &payload,
+                        Some(next_id),
+                        clock,
+                        group,
+                        0,
+                    )
+                    .unwrap();
             }
         }
         clock += Duration::from_millis(5);
@@ -1332,18 +1284,17 @@ fn eviction_is_fair_between_two_created_groups() {
                 next_id += 1;
                 let mut payload = vec![0_u8; 900];
                 payload[0] = u8::try_from(which).expect("0 or 1");
-                drop(
-                    wt.client
-                        .webtransport_send_datagram(
-                            session_id,
-                            &payload,
-                            Some(next_id),
-                            clock,
-                            group,
-                            0,
-                        )
-                        .unwrap(),
-                );
+                _ = wt
+                    .client
+                    .webtransport_send_datagram(
+                        session_id,
+                        &payload,
+                        Some(next_id),
+                        clock,
+                        group,
+                        0,
+                    )
+                    .unwrap();
             }
         }
         clock += Duration::from_millis(5);
@@ -1364,5 +1315,85 @@ fn eviction_is_fair_between_two_created_groups() {
         "the first-created group got {}/{total} of the wire: at equal send_order, \
          eviction always takes the lower group ID",
         delivered[0]
+    );
+}
+
+/// Tighter variant of `session_reset_by_peer_drops_queued_datagrams`.
+///
+/// Differences: the count is pinned rather than asserted non-empty, the
+/// server loop never advances the clock by a fixed step, and the peer is
+/// checked for the thing the change actually prevents, namely datagrams
+/// going out on the wire for a session that no longer exists.
+#[test]
+fn session_reset_by_peer_drops_queued_datagrams_tighter() {
+    const QUEUED: u64 = 20;
+
+    let mut wt = WtTest::new();
+    let wt_session = wt.create_wt_session();
+    let session_id = wt_session.stream_id();
+    let t0 = now();
+
+    for id in 0..QUEUED {
+        assert_eq!(
+            wt.client.webtransport_send_datagram(
+                session_id,
+                &[0x5a; 1000],
+                Some(id),
+                t0,
+                SendGroupId::new(0),
+                0
+            ),
+            Ok(DatagramQueueOutcome::Ok)
+        );
+    }
+
+    wt_session
+        .cancel_fetch(crate::Error::HttpNone.code())
+        .unwrap();
+
+    // Only the server's own timer advances the clock. `Output::None` means it
+    // has nothing to send and no timer armed, so no reset is ever coming: that
+    // is the failure, not a reason to poll again a millisecond later.
+    let mut t = t0;
+    let reset = loop {
+        match wt.server.process_output(t) {
+            Output::Datagram(d) => break d,
+            Output::Callback(delay) => t += delay,
+            Output::None => panic!("server has no reset to send and no timer armed"),
+        }
+    };
+
+    wt.client.process_input(reset, t);
+    // Drive to quiescence rather than building a single packet, so teardown
+    // cannot be half-done when the assertions run.
+    exchange_at(&mut wt, &mut t);
+
+    let outcomes = client_datagram_outcomes(&mut wt, session_id);
+    assert_eq!(
+        outcomes.len(),
+        usize::try_from(QUEUED).expect("small"),
+        "every queued datagram must be reported exactly once, got {outcomes:?}"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .all(|o| matches!(o, DatagramOutcome::Dropped(_))),
+        "a datagram queued at close is dropped, not expired or sent: {outcomes:?}"
+    );
+    assert_eq!(
+        wt.server
+            .events()
+            .filter(|e| matches!(
+                e,
+                Http3ServerEvent::WebTransport(ServerEvent::Datagram { .. })
+            ))
+            .count(),
+        0,
+        "nothing may reach the peer on behalf of a session that is gone"
+    );
+    assert_eq!(
+        wt.client.connection().next_datagram_expiry(),
+        None,
+        "nothing may stay queued for a closed session, or its expiry keeps coming due"
     );
 }

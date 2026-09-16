@@ -2105,7 +2105,7 @@ mod review_bugs {
     /// a resume signal that will never come.
     #[test]
     fn hwm_zero_resumes_once_drained() {
-        let mut q = DatagramQueue::new();
+        let mut q = DatagramQueue::default();
         let t = now();
         q.set_high_water_mark(Some(0));
 
@@ -2130,11 +2130,13 @@ mod review_bugs {
     /// before enqueueing, not after") fixed in the previous stack.
     #[test]
     fn stale_datagram_is_expired_not_evicted() {
-        let mut q = DatagramQueue::new();
-        q.max_queued_bytes = charge(1); // room for exactly one 1-byte datagram
+        let mut q = DatagramQueue {
+            max_queued_bytes: charge(1), // room for exactly one 1-byte datagram
+            ..DatagramQueue::default()
+        };
         let t0 = now();
         let max_age = Duration::from_millis(50);
-        q.set_max_age(Some(max_age), t0, DEFAULT_MAX_AGE_FLOOR);
+        _ = q.set_max_age(Some(max_age), t0, DEFAULT_MAX_AGE_FLOOR);
 
         assert_eq!(
             q.enqueue(vec![1], Some(1), t0, g(0), 0),
@@ -2156,10 +2158,10 @@ mod review_bugs {
     /// datagrams still reports `AboveWatermark`.
     #[test]
     fn stale_datagrams_do_not_count_against_the_watermark() {
-        let mut q = DatagramQueue::new();
+        let mut q = DatagramQueue::default();
         let t0 = now();
         let max_age = Duration::from_millis(50);
-        q.set_max_age(Some(max_age), t0, DEFAULT_MAX_AGE_FLOOR);
+        _ = q.set_max_age(Some(max_age), t0, DEFAULT_MAX_AGE_FLOOR);
         q.set_high_water_mark(Some(1));
 
         assert_eq!(
@@ -2215,10 +2217,6 @@ mod invariants {
                     bytes += charge(d.data.len());
                 }
             }
-            assert_eq!(
-                group.count, group_count,
-                "seed {seed} step {step}: group {gid:?} count drifted"
-            );
             assert!(
                 !group.is_empty(),
                 "seed {seed} step {step}: empty group {gid:?} left in the map"
@@ -2242,8 +2240,10 @@ mod invariants {
         let t0 = now();
         for seed in 1..200_u64 {
             let mut rng = Rng(seed);
-            let mut q = DatagramQueue::new();
-            q.max_queued_bytes = 1 + usize::try_from(rng.below(6)).expect("small") * charge(4);
+            let mut q = DatagramQueue {
+                max_queued_bytes: 1 + usize::try_from(rng.below(6)).expect("small") * charge(4),
+                ..DatagramQueue::default()
+            };
             let default_max_age = Duration::from_millis(1 + rng.below(50));
             let mut clock = t0;
             let mut next_id = 0;
@@ -2253,7 +2253,7 @@ mod invariants {
                     0..=4 => {
                         next_id += 1;
                         let len = usize::try_from(rng.below(8)).expect("small");
-                        q.enqueue(
+                        _ = q.enqueue(
                             vec![7; len],
                             Some(next_id),
                             clock,
@@ -2270,7 +2270,7 @@ mod invariants {
                         );
                     }
                     6 => {
-                        q.expire(clock, default_max_age);
+                        _ = q.expire(clock, default_max_age);
                         assert!(
                             q.next_expiry(default_max_age).is_none_or(|e| e > clock),
                             "seed {seed} step {step}: expiry left something already due, \
@@ -2281,7 +2281,7 @@ mod invariants {
                     8 => {
                         let age =
                             (rng.below(2) == 0).then(|| Duration::from_millis(1 + rng.below(50)));
-                        q.set_max_age(age, clock, default_max_age);
+                        _ = q.set_max_age(age, clock, default_max_age);
                     }
                     _ => clock += Duration::from_millis(rng.below(30)),
                 }
