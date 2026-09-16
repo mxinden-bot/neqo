@@ -2056,3 +2056,235 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod review_3982 {
+    use test_fixture::now;
+
+    use super::*;
+
+    const fn g(id: u64) -> SendGroupId {
+        SendGroupId::new(id)
+    }
+
+    /// Admission now compares `send_order` alone, with a comment explaining
+    /// that reusing the full `(send_order, send_group_id)` tuple would let
+    /// group ID decide admission and "under sustained equal-order pressure the
+    /// lowest-numbered group would always lose". Victim *selection* still uses
+    /// the tuple, so at equal `send_order` the lowest group ID is evicted every
+    /// time and the same starvation happens one step later.
+    ///
+    /// `SendGroupId::new(0)` is the null-sendGroup sentinel, so the group that
+    /// starves is the one an application never named.
+    #[test]
+    fn eviction_does_not_starve_the_lowest_group() {
+        const ROUNDS: usize = 300;
+
+        let mut q = DatagramQueue {
+            max_queued_bytes: 4 * charge(100),
+            ..DatagramQueue::default()
+        };
+        let t = now();
+        let mut sent = [0_usize, 0];
+        let mut next_id = 0_u64;
+
+        // Both groups offer the same load at the same send_order, and the
+        // drain is slower than the offered rate, so the byte budget is under
+        // constant pressure. Round-robin should still give each group about
+        // half of what leaves the queue.
+        for round in 0..ROUNDS {
+            for which in 0_u64..2 {
+                next_id += 1;
+                let mut payload = vec![0_u8; 100];
+                payload[0] = u8::try_from(which).expect("0 or 1");
+                _ = q.enqueue(payload, Some(next_id), t, g(which), 0);
+            }
+            if round % 2 == 0
+                && let Some(d) = q.take_next()
+            {
+                sent[usize::from(d.data[0])] += 1;
+            }
+        }
+
+        let total = sent[0] + sent[1];
+        assert!(total > 0, "nothing was drained");
+        assert!(
+            sent[0] * 4 >= total,
+            "group 0 got {}/{total} of the drain: at equal send_order the byte \
+             budget evicts the lowest group ID every time, so round-robin never \
+             gets to serve it",
+            sent[0]
+        );
+    }
+
+    /// `enqueue` takes a `now` and uses it only as a timestamp. A datagram
+    /// already past its max age still occupies the byte budget and the high
+    /// water mark, and is reported `Dropped` rather than `Expired`.
+    #[test]
+    fn a_stale_datagram_does_not_occupy_the_byte_budget() {
+        let mut q = DatagramQueue {
+            max_queued_bytes: charge(1),
+            ..DatagramQueue::default()
+        };
+        let t0 = now();
+        let max_age = Duration::from_millis(50);
+        _ = q.set_max_age(Some(max_age), t0, DEFAULT_MAX_AGE_FLOOR);
+
+        assert_eq!(
+            q.enqueue(vec![1], Some(1), t0, g(0), 0),
+            DatagramQueueOutcome::Ok
+        );
+
+        let t1 = t0 + max_age * 2;
+        assert_eq!(
+            q.enqueue(vec![2], Some(2), t1, g(0), 0),
+            DatagramQueueOutcome::Ok,
+            "datagram 1 is twice past its max age and must be shed as expired"
+        );
+    }
+
+    /// Same omission on the high-water-mark path, which needs no byte-budget
+    /// setup: a queue holding nothing but stale datagrams still says stop.
+    #[test]
+    fn a_stale_datagram_does_not_exert_backpressure() {
+        let mut q = DatagramQueue::default();
+        let t0 = now();
+        let max_age = Duration::from_millis(50);
+        _ = q.set_max_age(Some(max_age), t0, DEFAULT_MAX_AGE_FLOOR);
+        q.set_high_water_mark(Some(1));
+
+        assert_eq!(
+            q.enqueue(vec![1], Some(1), t0, g(0), 0),
+            DatagramQueueOutcome::Ok
+        );
+
+        let t1 = t0 + max_age * 2;
+        assert_eq!(
+            q.enqueue(vec![2], Some(2), t1, g(0), 0),
+            DatagramQueueOutcome::Ok,
+            "a stale datagram must not count against the high water mark"
+        );
+    }
+}
+
+#[cfg(test)]
+mod review_3982_invariants {
+    use test_fixture::now;
+
+    use super::*;
+
+    /// Deterministic xorshift, so a failure is reproducible from its seed.
+    struct Rng(u64);
+
+    impl Rng {
+        const fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        const fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// Walk the queue's structure and compare it against the running totals
+    /// that every public method maintains incrementally.
+    fn check(q: &DatagramQueue, seed: u64, step: usize) {
+        let mut count = 0;
+        let mut bytes = 0;
+        for (gid, group) in &q.groups {
+            for bucket in group.by_order.values() {
+                assert!(
+                    !bucket.is_empty(),
+                    "seed {seed} step {step}: empty send_order bucket in group {gid:?}"
+                );
+                count += bucket.len();
+                for d in bucket {
+                    bytes += charge(d.data.len());
+                }
+            }
+            assert!(
+                !group.is_empty(),
+                "seed {seed} step {step}: empty group {gid:?} left in the map"
+            );
+        }
+        assert_eq!(
+            q.total_count, count,
+            "seed {seed} step {step}: total_count drifted"
+        );
+        assert_eq!(
+            q.total_bytes, bytes,
+            "seed {seed} step {step}: total_bytes drifted"
+        );
+    }
+
+    /// Hammer every public operation in random order and check the queue's
+    /// accounting after each one.
+    #[test]
+    fn accounting_survives_random_operations() {
+        let t0 = now();
+        for seed in 1..200_u64 {
+            let mut rng = Rng(seed);
+            let mut q = DatagramQueue {
+                max_queued_bytes: 1 + usize::try_from(rng.below(6)).expect("small") * charge(4),
+                ..DatagramQueue::default()
+            };
+            let default_max_age = Duration::from_millis(1 + rng.below(50));
+            let mut clock = t0;
+            let mut next_id = 0;
+
+            for step in 0..200 {
+                match rng.below(11) {
+                    0..=4 => {
+                        next_id += 1;
+                        let len = usize::try_from(rng.below(8)).expect("small");
+                        _ = q.enqueue(
+                            vec![7; len],
+                            Some(next_id),
+                            clock,
+                            SendGroupId::new(rng.below(3)),
+                            i64::try_from(rng.below(3)).expect("small"),
+                        );
+                    }
+                    5 => {
+                        let peeked = q.peek_next_len();
+                        let taken = q.take_next().map(|d| d.data.len());
+                        assert_eq!(
+                            peeked, taken,
+                            "seed {seed} step {step}: peek and take disagreed"
+                        );
+                    }
+                    6 => {
+                        _ = q.expire(clock, default_max_age);
+                        assert!(
+                            q.next_expiry(default_max_age).is_none_or(|e| e > clock),
+                            "seed {seed} step {step}: expiry left a deadline already due, \
+                             which trips `Connection::next_delay`'s `earliest > now` assert"
+                        );
+                    }
+                    7 => q.set_high_water_mark(Some(usize::try_from(rng.below(4)).expect("small"))),
+                    8 => {
+                        let age =
+                            (rng.below(2) == 0).then(|| Duration::from_millis(1 + rng.below(50)));
+                        _ = q.set_max_age(age, clock, default_max_age);
+                    }
+                    9 => q.set_max_queued_bytes(usize::try_from(rng.below(400)).expect("small")),
+                    _ => clock += Duration::from_millis(rng.below(30)),
+                }
+                check(&q, seed, step);
+                _ = q.resume_if_unblocked();
+            }
+
+            let drained: Vec<_> = q.take_all().collect();
+            assert!(
+                q.is_empty(),
+                "seed {seed}: take_all left the queue non-empty"
+            );
+            assert_eq!(q.total_bytes, 0, "seed {seed}: take_all left bytes behind");
+            check(&q, seed, usize::MAX);
+            drop(drained);
+        }
+    }
+}
