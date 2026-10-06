@@ -11,9 +11,10 @@ use std::{
     time::Instant,
 };
 
-use neqo_common::{Header, qdebug, qerror, qlog::Qlog, qtrace, to_u64};
+use neqo_common::{Header, qlog::Qlog, to_u64};
 use neqo_transport::{Connection, Error as TransportError, StreamId};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use tracing::{debug, error, trace};
 
 use crate::{
     Error, Res, Settings,
@@ -114,7 +115,7 @@ impl Encoder {
             return Ok(());
         }
 
-        qdebug!(
+        debug!(
             "[{self}] Set max capacity to new capacity:{cap} old:{} max_table_size={}",
             self.table.capacity(),
             self.max_table_size,
@@ -148,7 +149,7 @@ impl Encoder {
     }
 
     fn read_instructions(&mut self, conn: &mut Connection, now: Instant) -> Res<()> {
-        qdebug!("[{self}] read a new instruction");
+        debug!("[{self}] read a new instruction");
         let Some(stream_id) = self.recv_stream_id else {
             debug_assert!(false, "receive() before add_recv_stream()");
             return Err(Error::Internal);
@@ -250,7 +251,7 @@ impl Encoder {
         qlog: &mut Qlog,
         now: Instant,
     ) -> Res<()> {
-        qdebug!("[{self}] call instruction {instruction:?}");
+        debug!("[{self}] call instruction {instruction:?}");
         match instruction {
             DecoderInstruction::InsertCountIncrement { increment } => {
                 // RFC 9204, Section 4.4.3: an Increment of zero is a connection error
@@ -298,7 +299,7 @@ impl Encoder {
         name: &[u8],
         value: &[u8],
     ) -> Res<u64> {
-        qdebug!("[{self}] insert {name:?} {value:?}");
+        debug!("[{self}] insert {name:?} {value:?}");
 
         let entry_size = name.len() + value.len() + ADDITIONAL_TABLE_ENTRY_SIZE;
 
@@ -331,7 +332,7 @@ impl Encoder {
     }
 
     fn change_capacity(&mut self, value: u64) {
-        qdebug!("[{self}] change capacity: {value}");
+        debug!("[{self}] change capacity: {value}");
         self.next_capacity = Some(value);
     }
 
@@ -371,7 +372,7 @@ impl Encoder {
     pub fn send_encoder_updates(&mut self, conn: &mut Connection) -> Res<()> {
         match self.local_stream {
             LocalStreamState::NoStream => {
-                qerror!("Send call but there is no stream yet");
+                error!("Send call but there is no stream yet");
                 Ok(())
             }
             LocalStreamState::Uninitialized(stream_id) => {
@@ -417,7 +418,7 @@ impl Encoder {
         h: &[Header],
         stream_id: StreamId,
     ) -> HeaderEncoder {
-        qdebug!("[{self}] encoding headers");
+        debug!("[{self}] encoding headers");
 
         // Try to send capacity instructions if present.
         // This code doesn't try to deal with errors, it just tries
@@ -453,7 +454,7 @@ impl Encoder {
         for iter in h {
             let name = iter.name().as_bytes().to_vec();
             let value = iter.value();
-            qtrace!("encoding {name:x?} {value:x?}");
+            trace!("encoding {name:x?} {value:x?}");
 
             let found = if can_track {
                 self.table.lookup(&name, value, can_block)
@@ -466,7 +467,7 @@ impl Encoder {
                 value_matches,
             }) = found
             {
-                qtrace!(
+                trace!(
                     "[{self}] found a {} entry, value-match={value_matches}",
                     if static_table { "static" } else { "dynamic" }
                 );

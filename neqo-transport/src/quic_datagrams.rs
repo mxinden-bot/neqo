@@ -20,7 +20,8 @@
 
 use std::{cmp::min, collections::VecDeque};
 
-use neqo_common::{Buffer, Encoder, qdebug, qtrace, to_u64};
+use neqo_common::{Buffer, Encoder, to_u64};
+use tracing::{debug, trace};
 
 use crate::{
     ConnectionEvents, Error, Res, Stats,
@@ -143,7 +144,7 @@ impl QuicDatagrams {
                 debug_assert!(builder.len() <= builder.limit());
                 stats.frame_tx.datagram += 1;
                 tokens.push(recovery::Token::Datagram(*dgram.tracking()));
-                qtrace!(
+                trace!(
                     "Sent QUIC datagram, {} remaining in queue.",
                     self.datagrams.len()
                 );
@@ -151,7 +152,7 @@ impl QuicDatagrams {
                 // If the packet is empty, except packet headers, and the
                 // datagram cannot fit, drop it.
                 // Also continue trying to write the next QuicDatagram.
-                qdebug!(
+                debug!(
                     "QUIC datagram ({}) does not fit MTU, dropping it, {} remaining in queue.",
                     dgram.data.len(),
                     self.datagrams.len()
@@ -187,7 +188,7 @@ impl QuicDatagrams {
     /// limit) is only checked at send time, where it is dropped if it does not.
     pub fn add_datagram(&mut self, data: Vec<u8>, tracking: DatagramTracking) -> Res<bool> {
         if to_u64(data.len()) > self.remote_datagram_size {
-            qdebug!(
+            debug!(
                 "QUIC datagram exceeds remote limit, dropping it, datagram size {}, remote datagram size limit {}.",
                 data.len(),
                 self.remote_datagram_size
@@ -198,7 +199,7 @@ impl QuicDatagrams {
         if self.datagrams.len() < self.max_queued_outgoing_datagrams {
             return Ok(true);
         }
-        qdebug!(
+        debug!(
             "QUIC datagram queue full (len {} / max {}), applying backpressure.",
             self.datagrams.len(),
             self.max_queued_outgoing_datagrams

@@ -674,6 +674,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lazy_static"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
+
+[[package]]
 name = "libc"
 version = "0.2.183"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -759,7 +765,6 @@ dependencies = [
  "hex",
  "http",
  "libc",
- "log",
  "neqo-bin",
  "neqo-common",
  "neqo-http3",
@@ -775,6 +780,7 @@ dependencies = [
  "test-fixture 0.32.0",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -795,6 +801,8 @@ dependencies = [
  "strum",
  "test-fixture 0.32.0",
  "thiserror",
+ "tracing",
+ "tracing-subscriber",
  "windows",
 ]
 
@@ -805,7 +813,6 @@ dependencies = [
  "codspeed-criterion-compat",
  "enumset",
  "http",
- "log",
  "neqo-common",
  "neqo-http3",
  "neqo-qpack",
@@ -818,13 +825,13 @@ dependencies = [
  "strum",
  "test-fixture 0.32.0",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
 name = "neqo-qpack"
 version = "0.32.0"
 dependencies = [
- "log",
  "neqo-common",
  "neqo-transport",
  "qlog",
@@ -832,6 +839,7 @@ dependencies = [
  "static_assertions",
  "test-fixture 0.32.0",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -842,7 +850,6 @@ dependencies = [
  "enum-map",
  "enumset",
  "indexmap",
- "log",
  "mtu",
  "neqo-common",
  "neqo-transport",
@@ -857,6 +864,7 @@ dependencies = [
  "strum",
  "test-fixture 0.32.0",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -865,9 +873,9 @@ version = "0.32.0"
 dependencies = [
  "cfg_aliases",
  "libc",
- "log",
  "neqo-common",
  "quinn-udp",
+ "tracing",
  "windows",
 ]
 
@@ -980,8 +988,8 @@ checksum = "3ca72c3f2792761ab5fa848490694cbc728c7f659669ed4320c4c79c12150966"
 dependencies = [
  "cfg_aliases",
  "libc",
- "log",
  "socket2",
+ "tracing",
  "windows-sys",
 ]
 
@@ -1175,6 +1183,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sharded-slab"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
+dependencies = [
+ "lazy_static",
+]
+
+[[package]]
 name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1273,7 +1290,6 @@ dependencies = [
 name = "test-fixture"
 version = "0.32.0"
 dependencies = [
- "log",
  "neqo-common",
  "neqo-http3",
  "neqo-transport",
@@ -1281,6 +1297,7 @@ dependencies = [
  "qlog",
  "serde_json",
  "test-fixture 0.1.0",
+ "tracing",
 ]
 
 [[package]]
@@ -1301,6 +1318,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "thread_local"
+version = "1.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]
@@ -1367,6 +1393,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0cbe268d35bdb4bb5a56a2de88d0ad0eb70af5384a99d648cd4b3d04039800e"
 dependencies = [
  "winnow",
+]
+
+[[package]]
+name = "tracing"
+version = "0.1.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
+dependencies = [
+ "pin-project-lite",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-core"
+version = "0.1.36"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+dependencies = [
+ "once_cell",
+]
+
+[[package]]
+name = "tracing-subscriber"
+version = "0.3.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
+dependencies = [
+ "sharded-slab",
+ "thread_local",
+ "tracing-core",
 ]
 
 [[package]]

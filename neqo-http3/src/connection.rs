@@ -12,9 +12,7 @@ use std::{
     time::Instant,
 };
 
-use neqo_common::{
-    Bytes, Decoder, Header, MessageType, Role, qdebug, qerror, qinfo, qtrace, qwarn,
-};
+use neqo_common::{Bytes, Decoder, Header, MessageType, Role};
 use neqo_qpack as qpack;
 use neqo_transport::{
     AppError, CloseReason, Connection, DatagramTracking, State, StreamId, StreamType, ZeroRttState,
@@ -22,6 +20,7 @@ use neqo_transport::{
 };
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use strum::Display;
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     CloseType, Error, Http3Parameters, Http3StreamType, HttpRecvStreamEvents, NewStreamType,
@@ -355,7 +354,7 @@ impl Http3Connection {
     /// This function creates and initializes, i.e. send stream type, the control and qpack
     /// streams.
     fn initialize_http3_connection(&mut self, conn: &mut Connection) -> Res<()> {
-        qdebug!("[{self}] Initialize the http3 connection");
+        debug!("[{self}] Initialize the http3 connection");
         self.control_stream_local.create(conn)?;
 
         self.send_settings();
@@ -364,7 +363,7 @@ impl Http3Connection {
     }
 
     fn send_settings(&mut self) {
-        qdebug!("[{self}] Send settings");
+        debug!("[{self}] Send settings");
         self.control_stream_local.queue_frame(&HFrame::Settings {
             settings: HSettings::from(&self.local_params),
         });
@@ -377,7 +376,7 @@ impl Http3Connection {
     }
 
     fn create_qpack_streams(&self, conn: &mut Connection) -> Res<()> {
-        qdebug!("[{self}] create_qpack_streams");
+        debug!("[{self}] create_qpack_streams");
         self.qpack_encoder
             .borrow_mut()
             .add_send_stream(conn.stream_create(StreamType::UniDi)?)?;
@@ -470,7 +469,7 @@ impl Http3Connection {
     /// event is received.  This registers the stream with a
     /// [`NewStreamHeadReader`] handler.
     pub(crate) fn add_new_stream(&mut self, stream_id: StreamId) {
-        qtrace!("[{self}] A new stream: {stream_id}");
+        trace!("[{self}] A new stream: {stream_id}");
         self.recv_streams.insert(
             stream_id,
             Box::new(NewStreamHeadReader::new(stream_id, self.role)),
@@ -486,7 +485,7 @@ impl Http3Connection {
         stream_id: StreamId,
         now: Instant,
     ) -> Res<ReceiveOutput> {
-        qtrace!("[{self}] Readable stream {stream_id}");
+        trace!("[{self}] Readable stream {stream_id}");
 
         if let Some(recv_stream) = self.recv_streams.get_mut(&stream_id) {
             let res = recv_stream.receive(conn, now);
@@ -504,7 +503,7 @@ impl Http3Connection {
         now: Instant,
     ) -> Res<()> {
         for stream_id in unblocked_streams {
-            qdebug!("[{self}] Stream {stream_id} is unblocked");
+            debug!("[{self}] Stream {stream_id} is unblocked");
             if let Some(r) = self.recv_streams.get_mut(&stream_id) {
                 let res = r
                     .http_stream()
@@ -567,7 +566,7 @@ impl Http3Connection {
         app_error: AppError,
         conn: &mut Connection,
     ) -> Res<()> {
-        qinfo!("[{self}] Handle a stream reset stream_id={stream_id} app_err={app_error}");
+        info!("[{self}] Handle a stream reset stream_id={stream_id} app_err={app_error}");
 
         self.close_recv(stream_id, CloseType::ResetRemote(app_error), conn)
     }
@@ -578,7 +577,7 @@ impl Http3Connection {
         app_error: AppError,
         conn: &mut Connection,
     ) -> Res<()> {
-        qinfo!("[{self}] Handle stream_stop_sending stream_id={stream_id} app_err={app_error}");
+        info!("[{self}] Handle stream_stop_sending stream_id={stream_id} app_err={app_error}");
 
         if self.send_stream_is_critical(stream_id) {
             return Err(Error::HttpClosedCriticalStream);
@@ -595,7 +594,7 @@ impl Http3Connection {
         conn: &mut Connection,
         state: &State,
     ) -> Res<bool> {
-        qdebug!("[{self}] Handle state change {state:?}");
+        debug!("[{self}] Handle state change {state:?}");
         match state {
             State::Handshaking => {
                 if self.role == Role::Server
@@ -667,7 +666,7 @@ impl Http3Connection {
     pub(crate) fn handle_datagram(&mut self, datagram: Vec<u8>) {
         let mut decoder = Decoder::new(&datagram);
         let Some(id) = decoder.decode_varint() else {
-            qdebug!("[{self}] handle_datagram: failed to decode session ID");
+            debug!("[{self}] handle_datagram: failed to decode session ID");
             return;
         };
         let varint_len = decoder.offset();
@@ -677,7 +676,7 @@ impl Http3Connection {
             .get_mut(&StreamId::from(id * 4))
             .and_then(|s| s.extended_connect_session())
         else {
-            qdebug!("[{self}] handle_datagram for unknown extended connect session");
+            debug!("[{self}] handle_datagram for unknown extended connect session");
             return;
         };
 
@@ -716,7 +715,7 @@ impl Http3Connection {
             }
 
             NewStreamType::Decoder => {
-                qdebug!("[{self}] A new remote qpack encoder stream {stream_id}");
+                debug!("[{self}] A new remote qpack encoder stream {stream_id}");
                 self.check_stream_exists(Http3StreamType::Decoder)?;
                 self.recv_streams.insert(
                     stream_id,
@@ -727,7 +726,7 @@ impl Http3Connection {
                 );
             }
             NewStreamType::Encoder => {
-                qdebug!("[{self}] A new remote qpack decoder stream {stream_id}");
+                debug!("[{self}] A new remote qpack decoder stream {stream_id}");
                 self.check_stream_exists(Http3StreamType::Encoder)?;
                 self.recv_streams.insert(
                     stream_id,
@@ -738,7 +737,7 @@ impl Http3Connection {
                 );
             }
             NewStreamType::Http(_) => {
-                qinfo!("[{self}] A new http stream {stream_id}");
+                info!("[{self}] A new http stream {stream_id}");
             }
             NewStreamType::WebTransportStream(session_id) => {
                 let session_exists = self
@@ -755,7 +754,7 @@ impl Http3Connection {
                     Ok(()) | Err(neqo_transport::Error::InvalidStreamId) => (),
                     Err(e) => return Err(Error::from(e)),
                 }
-                qinfo!("[{self}] A new WebTransport stream {stream_id} for session {session_id}");
+                info!("[{self}] A new WebTransport stream {stream_id} for session {session_id}");
             }
             NewStreamType::Unknown => {
                 conn.stream_stop_sending(stream_id, Error::HttpStreamCreation.code())?;
@@ -775,10 +774,10 @@ impl Http3Connection {
 
     /// This is called when an application closes the connection.
     pub fn close(&mut self, error: AppError) {
-        qdebug!("[{self}] Close connection error {error:?}");
+        debug!("[{self}] Close connection error {error:?}");
         self.state = Http3State::Closing(CloseReason::Application(error));
         if (!self.send_streams.is_empty() || !self.recv_streams.is_empty()) && (error == 0) {
-            qdebug!("close(0) called when streams still active");
+            debug!("close(0) called when streams still active");
         }
         self.send_streams.clear();
         self.recv_streams.clear();
@@ -831,14 +830,13 @@ impl Http3Connection {
     {
         match request.connect_type {
             Some(_) if request.method != "CONNECT" => {
-                qwarn!("Method CONNECT without CONNECT type");
+                warn!("Method CONNECT without CONNECT type");
                 return Err(Error::InvalidInput);
             }
             None if request.method == "CONNECT" => {
-                qwarn!(
+                warn!(
                     "Method {} with CONNECT type {:?}",
-                    request.method,
-                    request.connect_type
+                    request.method, request.connect_type
                 );
                 return Err(Error::InvalidInput);
             }
@@ -893,10 +891,9 @@ impl Http3Connection {
     where
         T: RequestTarget,
     {
-        qinfo!(
+        info!(
             "[{self}] Request method={} target: {:?}",
-            request.method,
-            request.target,
+            request.method, request.target,
         );
         let id = self.create_bidi_transport_stream(conn)?;
         self.request_with_stream(id, conn, send_events, recv_events, request, now)?;
@@ -992,7 +989,7 @@ impl Http3Connection {
         buf: &mut [u8],
         now: Instant,
     ) -> Res<(usize, bool)> {
-        qdebug!("[{self}] read_data from stream {stream_id}");
+        debug!("[{self}] read_data from stream {stream_id}");
         let res = self
             .recv_streams
             .get_mut(&stream_id)
@@ -1009,7 +1006,7 @@ impl Http3Connection {
         stream_id: StreamId,
         error: AppError,
     ) -> Res<()> {
-        qdebug!("[{self}] Reset sending side of stream {stream_id} error={error}");
+        debug!("[{self}] Reset sending side of stream {stream_id} error={error}");
 
         if self.send_stream_is_critical(stream_id) {
             return Err(Error::InvalidStreamId);
@@ -1033,7 +1030,7 @@ impl Http3Connection {
         stream_id: StreamId,
         now: Instant,
     ) -> Res<()> {
-        qtrace!("[{self}] Commit reliable size on stream {stream_id}");
+        trace!("[{self}] Commit reliable size on stream {stream_id}");
         // The request is routed through the send stream so that any data still buffered in the
         // HTTP/3 layer is flushed to the transport before the commitment is made.
         self.send_streams
@@ -1048,7 +1045,7 @@ impl Http3Connection {
         stream_id: StreamId,
         error: AppError,
     ) -> Res<()> {
-        qdebug!("[{self}] Send stop sending for stream {stream_id} error={error}");
+        debug!("[{self}] Send stop sending for stream {stream_id} error={error}");
         if self.recv_stream_is_critical(stream_id) {
             return Err(Error::InvalidStreamId);
         }
@@ -1125,7 +1122,7 @@ impl Http3Connection {
         error: AppError,
         conn: &mut Connection,
     ) -> Res<()> {
-        qinfo!("[{self}] cancel_fetch {stream_id} error={error}");
+        info!("[{self}] cancel_fetch {stream_id} error={error}");
         let send_stream = self.send_streams.get(&stream_id);
         let recv_stream = self.recv_streams.get(&stream_id);
         match (send_stream, recv_stream) {
@@ -1175,7 +1172,7 @@ impl Http3Connection {
         stream_id: StreamId,
         now: Instant,
     ) -> Res<()> {
-        qdebug!("[{self}] Close the sending side for stream {stream_id}");
+        debug!("[{self}] Close the sending side for stream {stream_id}");
         debug_assert!(self.state.active());
         let send_stream = self
             .send_streams
@@ -1512,7 +1509,7 @@ impl Http3Connection {
         recv_events: Box<dyn RecvStreamEvents>,
         send_group: Option<SendGroupId>,
     ) -> Res<StreamId> {
-        qtrace!(
+        trace!(
             "Create new WebTransport stream session={session_id} type={stream_type:?} send_group={send_group:?}"
         );
 
@@ -1550,7 +1547,7 @@ impl Http3Connection {
         send_events: Box<dyn SendStreamEvents>,
         recv_events: Box<dyn RecvStreamEvents>,
     ) -> Res<()> {
-        qtrace!("Create new WebTransport stream session={session_id} stream_id={stream_id}");
+        trace!("Create new WebTransport stream session={session_id} stream_id={stream_id}");
 
         let wt = self.get_extended_connect_session(session_id)?;
 
@@ -1637,7 +1634,7 @@ impl Http3Connection {
     /// `PriorityUpdateRequest`, and the unsupported server-push control frames) are given to the
     /// specific client/server handler.
     fn handle_control_frame(&mut self, conn: &Connection, f: HFrame) -> Res<Option<HFrame>> {
-        qdebug!("[{self}] Handle a control frame {f:?}");
+        debug!("[{self}] Handle a control frame {f:?}");
         if !matches!(f, HFrame::Settings { .. })
             && !matches!(
                 self.settings_state,
@@ -1668,7 +1665,7 @@ impl Http3Connection {
     }
 
     fn handle_settings(&mut self, conn: &Connection, new_settings: HSettings) -> Res<()> {
-        qdebug!("[{self}] Handle SETTINGS frame");
+        debug!("[{self}] Handle SETTINGS frame");
         let prereqs = TransportPrerequisites::new(
             conn.remote_datagram_size() > 0,
             conn.peer_supports_reliable_stream_reset(),
@@ -1705,7 +1702,7 @@ impl Http3Connection {
                         continue;
                     }
                     if zero_rtt_value > new_value {
-                        qerror!(
+                        error!(
                             "[{self}] The new({new_value}) and the old value({zero_rtt_value}) of setting {st:?} do not match"
                         );
                         return Err(Error::HttpSettings);
@@ -1726,7 +1723,7 @@ impl Http3Connection {
                     }
                 }
                 if qpack_changed {
-                    qdebug!("[{self}] Settings after zero rtt differ");
+                    debug!("[{self}] Settings after zero rtt differ");
                     self.set_qpack_settings(&(new_settings))?;
                 }
                 self.settings_state = Http3RemoteSettingsState::Received(new_settings);
@@ -1823,7 +1820,7 @@ impl Http3Connection {
             reason = "OK to loop over active streams in an undefined order."
         )]
         for id in recv {
-            qtrace!("Remove the extended connect sub receiver stream {id}");
+            trace!("Remove the extended connect sub receiver stream {id}");
             // Use CloseType::ResetRemote so that an event will be sent. CloseType::LocalError would
             // have the same effect.
             if let Some(mut s) = self.recv_streams.remove(&id) {
@@ -1836,7 +1833,7 @@ impl Http3Connection {
             reason = "OK to loop over active streams in an undefined order."
         )]
         for id in send {
-            qtrace!("Remove the extended connect sub send stream {id}");
+            trace!("Remove the extended connect sub send stream {id}");
             if let Some(mut s) = self.send_streams.remove(&id) {
                 s.handle_stop_sending(CloseType::ResetRemote(Error::HttpRequestCancelled.code()));
             }
