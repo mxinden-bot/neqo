@@ -136,9 +136,9 @@ mod tests {
         f.enabled()
     }
 
-    /// A WebTransport client only negotiates when the server advertises everything it needs
-    /// (extended CONNECT, HTTP/3 datagrams, and the datagram transport parameter); a server
-    /// has no such requirements on the peer.
+    /// A WebTransport client only negotiates when the server advertises WebTransport and
+    /// HTTP/3 datagrams, plus the datagram transport parameter; a server has no such
+    /// requirements on the peer.
     #[test]
     fn webtransport_feature_checks() {
         // Everything the server must advertise via SETTINGS for a client to use WebTransport.
@@ -163,14 +163,15 @@ mod tests {
             HSetting::new(HSettingType::EnableConnect, 1),
         ]);
 
-        // Client: needs all SETTINGS and the peer's transport parameters.
+        // Client: needs the WebTransport and datagram SETTINGS and the peer's transport
+        // parameters, but tolerates a missing extended CONNECT setting.
         assert!(negotiate(
             Role::Client,
             ExtendedConnectType::WebTransport,
             &full,
             true
         ));
-        assert!(!negotiate(
+        assert!(negotiate(
             Role::Client,
             ExtendedConnectType::WebTransport,
             &no_connect,
@@ -239,6 +240,29 @@ mod tests {
     }
 
     /// Confirm that the necessary features for `CONNECT_UDP` are validated.
+    /// WebTransport negotiates whether or not the server sends
+    /// `SETTINGS_ENABLE_CONNECT_PROTOCOL`. The draft (Section 3.1) has the server send it, but
+    /// some deployed servers advertise WebTransport without it.
+    #[test]
+    fn webtransport_ignores_missing_extended_connect() {
+        for connect in [0, 1] {
+            let settings = HSettings::new(&[
+                HSetting::new(HSettingType::EnableWebTransport, 1),
+                HSetting::new(HSettingType::EnableH3Datagram, 1),
+                HSetting::new(HSettingType::EnableConnect, connect),
+            ]);
+            assert!(
+                negotiate(
+                    Role::Client,
+                    ExtendedConnectType::WebTransport,
+                    &settings,
+                    true
+                ),
+                "WebTransport must negotiate regardless of SETTINGS_ENABLE_CONNECT_PROTOCOL"
+            );
+        }
+    }
+
     #[test]
     fn connect_udp_feature_checks() {
         // The client needs the server setting, but doesn't care about the transport features.

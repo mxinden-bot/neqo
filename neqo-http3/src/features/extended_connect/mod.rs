@@ -136,13 +136,15 @@ impl ExtendedConnectFeature {
     ) {
         // reset_stream_at is also required (draft Section 4.4), but too few servers support it
         // yet, so we don't gate on it for now (falls back to RESET_STREAM). See #3917.
+        // Likewise, a server advertising WebTransport must also send
+        // SETTINGS_ENABLE_CONNECT_PROTOCOL, but some deployed servers omit it, so the
+        // WebTransport setting alone gates the client.
         let conditions_met = match self.connect_type {
             ExtendedConnectType::WebTransport => {
                 transport_prereqs.datagrams
                     && settings.get(HSettingType::EnableH3Datagram) == 1
                     && (self.role == Role::Server
-                        || (settings.get(HSettingType::EnableConnect) == 1
-                            && settings.get(HSettingType::EnableWebTransport) == 1))
+                        || settings.get(HSettingType::EnableWebTransport) == 1)
             }
             ExtendedConnectType::ConnectUdp => {
                 self.role == Role::Server || settings.get(HSettingType::EnableConnect) == 1
@@ -156,6 +158,13 @@ impl ExtendedConnectFeature {
             debug!(
                 "WebTransport negotiated without peer reliable reset; stream resets use RESET_STREAM"
             );
+        }
+        if self.connect_type == ExtendedConnectType::WebTransport
+            && self.enabled()
+            && self.role == Role::Client
+            && settings.get(HSettingType::EnableConnect) != 1
+        {
+            debug!("WebTransport negotiated without peer SETTINGS_ENABLE_CONNECT_PROTOCOL");
         }
     }
 
