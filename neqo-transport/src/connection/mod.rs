@@ -1099,6 +1099,22 @@ impl Connection {
             qlog::packets_lost(&mut self.qlog, &lost, now);
         }
 
+        // With a single handshake flight, give up as soon as the first PTO fires
+        // without any response from the server, before any probe is sent.
+        if self.conn_params.single_flight_enabled()
+            && self.role == Role::Client
+            && self.state == State::WaitInitial
+            && !matches!(self.address_validation, AddressValidationInfo::Retry { .. })
+            && self.loss_recovery.pto_count() > 0
+        {
+            info!("[{self}] no response to the first handshake flight, closing");
+            self.set_state(
+                State::Closed(CloseReason::Transport(Error::NoHandshakeResponse)),
+                now,
+            );
+            return;
+        }
+
         // Declare the connection broken if too many consecutive PTOs have gone
         // unacknowledged, i.e. the path is a black hole. This closes the connection
         // sooner than, and with a distinct reason from, the idle timeout.
@@ -1516,7 +1532,9 @@ impl Connection {
             let conn_params = self
                 .conn_params
                 .clone()
-                .versions(version, self.conn_params.get_versions().all().to_vec());
+                .versions(version, self.conn_params.get_versions().all().to_vec())
+                // The server responded, so it speaks QUIC: no reason to give up early.
+                .single_flight(false);
             let mut c = Self::new_client(
                 self.crypto.server_name().ok_or(Error::VersionNegotiation)?,
                 self.crypto.protocols(),

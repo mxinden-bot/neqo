@@ -153,6 +153,9 @@ pub struct ConnectionParameters {
     /// locally. `None` (the default) disables the check, leaving the idle timeout
     /// as the only backstop.
     max_pto: Option<NonZeroUsize>,
+    /// Whether a client sends its first handshake flight only once. See
+    /// [`ConnectionParameters::single_flight`].
+    single_flight: bool,
     preferred_address: PreferredAddressConfig,
     datagram_size: u64,
     initial_rtt: Duration,
@@ -197,6 +200,7 @@ impl Default for ConnectionParameters {
             ack_ratio: Self::DEFAULT_ACK_RATIO,
             idle_timeout: Self::DEFAULT_IDLE_TIMEOUT,
             max_pto: None,
+            single_flight: false,
             preferred_address: PreferredAddressConfig::Default,
             datagram_size: MAX_DATAGRAM_FRAME_SIZE,
             initial_rtt: DEFAULT_INITIAL_RTT,
@@ -378,6 +382,28 @@ impl ConnectionParameters {
     #[must_use]
     pub const fn get_max_pto(&self) -> Option<NonZeroUsize> {
         self.max_pto
+    }
+
+    /// Send the client's first handshake flight only once. If the first PTO fires
+    /// before the server has responded in any way (Initial, Retry or Version
+    /// Negotiation), close the connection with [`Error::NoHandshakeResponse`]
+    /// instead of retransmitting.
+    ///
+    /// This suits an optimistic connection attempt to a server that is not known
+    /// to support QUIC, e.g. in the absence of Alt-Svc or an HTTPS DNS record,
+    /// where a lack of response most likely means no QUIC support and retrying
+    /// would only waste resources. Has no effect on a server.
+    ///
+    /// [`Error::NoHandshakeResponse`]: crate::Error::NoHandshakeResponse
+    #[must_use]
+    pub const fn single_flight(mut self, single_flight: bool) -> Self {
+        self.single_flight = single_flight;
+        self
+    }
+
+    #[must_use]
+    pub const fn single_flight_enabled(&self) -> bool {
+        self.single_flight
     }
 
     #[must_use]
